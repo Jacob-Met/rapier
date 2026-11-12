@@ -3,6 +3,7 @@ use crate::geometry::{ColliderHandle, ContactManifold, Shape, ShapeCastHit};
 use crate::math::{Pose, Real, Vector};
 use crate::pipeline::{QueryFilterFlags, QueryPipeline, QueryPipelineMut};
 use crate::utils;
+use crate::utils::CrossProduct;
 use na::{RealField, Vector2};
 use parry::bounding_volume::BoundingVolume;
 use parry::query::details::ShapeCastOptions;
@@ -954,6 +955,10 @@ impl KinematicCharacterController {
             }
         }
 
+        // A zero-mass character cannot transfer momentum to other bodies.
+        if character_mass <= 0.0 {
+            return;
+        }
         let velocity_to_transfer = movement_to_transfer * utils::inv(dt);
 
         for (manifold, collider_pos) in manifolds.iter().zip(manifold_collider_poses.iter()) {
@@ -962,18 +967,29 @@ impl KinematicCharacterController {
 
             for pt in &manifold.points {
                 if pt.dist <= prediction {
-                    let body_mass = body.mass();
                     let contact_point = collider_pos * pt.local_p2;
-                    let delta_vel_per_contact = (velocity_to_transfer
-                        - body.velocity_at_point(contact_point))
-                    .dot(manifold.data.normal);
-                    let mass_ratio = body_mass * character_mass / (body_mass + character_mass);
+                    let normal = manifold.data.normal;
+                    let delta_vel_per_contact =
+                        (velocity_to_transfer - body.velocity_at_point(contact_point)).dot(normal);
 
-                    body.apply_impulse_at_point(
-                        manifold.data.normal * delta_vel_per_contact.max(0.0) * mass_ratio,
-                        contact_point,
-                        true,
-                    );
+                    // An off-centre impulse also changes angular velocity. Using
+                    // the body's linear mass alone can amplify each contact and
+                    // send a light body flying when several points are solved.
+                    let r = contact_point - body.center_of_mass();
+                    let angular_impulse = r.gcross(normal);
+                    let angular_velocity =
+                        body.mprops.effective_world_inv_inertia * angular_impulse;
+                    let inv_effective_mass = normal
+                        .dot(normal * body.mprops.effective_inv_mass + angular_velocity.gcross(r))
+                        + 1.0 / character_mass;
+
+                    if inv_effective_mass > 0.0 {
+                        body.apply_impulse_at_point(
+                            normal * (delta_vel_per_contact.max(0.0) / inv_effective_mass),
+                            contact_point,
+                            true,
+                        );
+                    }
                 }
             }
         }

@@ -21,10 +21,33 @@ impl SoftFemSystem {
     /// topology changed), the per-cell material and shape functions, and the particle masses.
     pub fn prepare(&mut self, sb: &SoftBody, slots: &[u32]) {
         let n = sb.particles.len();
+        // The topology version belongs to one evolution of a soft body. In
+        // rollback simulations, two branches can have the same handle, counts,
+        // and version but DIFFERENT connectivity. Reusing the other branch's
+        // matrix would then solve constraints between the wrong particles.
+        let connectivity_changed = self
+            .cells
+            .iter()
+            .zip(&sb.cells)
+            .any(|(cached, current)| cached.vertices != current.vertices)
+            || self
+                .springs
+                .iter()
+                .zip(&sb.edges)
+                .any(|(cached, current)| cached.vertices != current.vertices);
+        #[cfg(feature = "dim3")]
+        let connectivity_changed = connectivity_changed
+            || self.dihedrals.len() != sb.dihedrals.len()
+            || self
+                .dihedrals
+                .iter()
+                .zip(&sb.dihedrals)
+                .any(|(cached, current)| cached.vertices != current.vertices);
         let rebuild = self.matrix.num_rows() != n
             || self.cells.len() != sb.cells.len()
             || self.springs.len() != sb.edges.len()
-            || self.topology_version != sb.topology_version();
+            || self.topology_version != sb.topology_version()
+            || connectivity_changed;
         if rebuild {
             self.topology_version = sb.topology_version();
             self.rebuild_pattern(sb);

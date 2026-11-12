@@ -352,11 +352,15 @@ impl PhysicsPipeline {
             impulse_joints.invalidate_selection_memo();
             self.joint_selection_primed = true;
         }
-        impulse_joints.select_active_interactions(
+        if impulse_joints.select_active_interactions(
             islands,
             bodies,
             &mut self.joint_constraint_indices,
-        );
+        ) {
+            // A cloned or deserialized set has no selection memo. Its local
+            // assembly epoch may still match the pipeline's newer layout.
+            self.staged_solver.invalidate_joint_assembly_cache();
+        }
         self.counters
             .stages
             .island_constraints_collection_time

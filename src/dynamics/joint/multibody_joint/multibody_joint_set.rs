@@ -1,4 +1,5 @@
 use crate::alloc_prelude::*;
+use alloc::sync::Arc;
 use parry::utils::hashset::HashSet;
 
 use crate::data::{Arena, Coarena, Index};
@@ -52,7 +53,7 @@ impl Default for MultibodyLinkId {
 #[derive(Default)]
 /// A set of rigid bodies that can be handled by a physics pipeline.
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct MultibodyJointSet {
     pub(crate) multibodies: Arena<Multibody>, // NOTE: a Slab would be sufficient.
     pub(crate) rb2mb: Coarena<MultibodyLinkId>,
@@ -73,6 +74,24 @@ pub struct MultibodyJointSet {
     /// solver contact graph detect that its two-body vs. generic (multibody)
     /// manifold classification may be stale and must be rebuilt.
     pub(crate) topology_epoch: u32,
+    // Equal topology epochs are possible on different rollback branches.
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    pub(crate) snapshot_identity: Arc<()>,
+}
+
+impl Clone for MultibodyJointSet {
+    fn clone(&self) -> Self {
+        Self {
+            multibodies: self.multibodies.clone(),
+            rb2mb: self.rb2mb.clone(),
+            connectivity_graph: self.connectivity_graph.clone(),
+            to_wake_up: self.to_wake_up.clone(),
+            to_join: self.to_join.clone(),
+            island_chain_events: self.island_chain_events.clone(),
+            topology_epoch: self.topology_epoch,
+            snapshot_identity: Arc::new(()),
+        }
+    }
 }
 
 impl MultibodyJointSet {
@@ -86,6 +105,7 @@ impl MultibodyJointSet {
             to_join: HashSet::default(),
             island_chain_events: Vec::new(),
             topology_epoch: 0,
+            snapshot_identity: Arc::new(()),
         }
     }
 

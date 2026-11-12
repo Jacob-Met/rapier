@@ -6,6 +6,7 @@ use crate::dynamics::{
 };
 use crate::geometry::{Collider, ColliderChanges, ColliderHandle, ColliderParent};
 use crate::math::{DIM, Pose, Vector};
+use alloc::sync::Arc;
 use core::ops::{Index, IndexMut};
 
 /// A set of modified colliders
@@ -24,7 +25,7 @@ impl HasModifiedFlag for Collider {
 }
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Default, Debug)]
+#[derive(Default, Debug)]
 /// The collection that stores all colliders (collision shapes) in your physics world.
 ///
 /// Similar to [`RigidBodySet`](crate::dynamics::RigidBodySet), this is the "database" where
@@ -52,6 +53,22 @@ pub struct ColliderSet {
     pub(crate) colliders: Arena<Collider>,
     pub(crate) modified_colliders: ModifiedColliders,
     pub(crate) removed_colliders: Vec<ColliderHandle>,
+    // A cloned world has different fixed CCD targets even if none of its
+    // colliders are marked modified in that branch. Keep the old token alive
+    // inside the CCD cache to prevent allocator-address reuse.
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    pub(crate) snapshot_identity: Arc<()>,
+}
+
+impl Clone for ColliderSet {
+    fn clone(&self) -> Self {
+        Self {
+            colliders: self.colliders.clone(),
+            modified_colliders: self.modified_colliders.clone(),
+            removed_colliders: self.removed_colliders.clone(),
+            snapshot_identity: Arc::new(()),
+        }
+    }
 }
 
 impl ColliderSet {
@@ -61,6 +78,7 @@ impl ColliderSet {
             colliders: Arena::new(),
             modified_colliders: Default::default(),
             removed_colliders: Vec::new(),
+            snapshot_identity: Arc::new(()),
         }
     }
 
@@ -72,6 +90,7 @@ impl ColliderSet {
             colliders: Arena::with_capacity(capacity),
             modified_colliders: ModifiedColliders::with_capacity(capacity),
             removed_colliders: Vec::new(),
+            snapshot_identity: Arc::new(()),
         }
     }
 

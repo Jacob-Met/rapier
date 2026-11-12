@@ -50,6 +50,13 @@ impl StagedIslandSolver {
             && groups_unchanged
             && self.prev_staged_active_set_epoch == active_set_epoch
             && self.prev_staged_assembly_epoch == joint_assembly_epoch
+            && self.prev_staged_multibody_topology_epoch == multibodies.topology_epoch
+            && self
+                .prev_staged_multibody_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| {
+                    alloc::sync::Arc::ptr_eq(snapshot, &multibodies.snapshot_identity)
+                })
             && self.prev_staged_joint_indices == joint_indices
             && self.staged_joint_colors_still_free(impulse_joints, contact_color_masks);
 
@@ -311,6 +318,8 @@ impl StagedIslandSolver {
         // rebuilding every step (niche configuration).
         self.prev_staged_active_set_epoch = active_set_epoch;
         self.prev_staged_assembly_epoch = joint_assembly_epoch;
+        self.prev_staged_multibody_topology_epoch = multibodies.topology_epoch;
+        self.prev_staged_multibody_snapshot = Some(multibodies.snapshot_identity.clone());
         self.prev_staged_joint_indices.clear();
         self.prev_staged_joint_indices
             .extend_from_slice(joint_indices);

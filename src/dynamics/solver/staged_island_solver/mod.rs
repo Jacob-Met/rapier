@@ -285,6 +285,10 @@ pub(crate) struct StagedIslandSolver {
     staged_joints_valid: bool,
     prev_staged_active_set_epoch: u32,
     prev_staged_assembly_epoch: u32,
+    // Multibody joints change the impulse-joint solver's generic vs two-body
+    // layout even when the impulse-joint set itself is unchanged.
+    prev_staged_multibody_topology_epoch: u32,
+    prev_staged_multibody_snapshot: Option<alloc::sync::Arc<()>>,
     prev_staged_joint_indices: Vec<JointIndex>,
     /// Group body ranges the cached joint layout was built for; the reuse gate compares them
     /// explicitly because group boundaries can move without an epoch bump (a component split
@@ -309,6 +313,12 @@ pub(crate) struct StagedIslandSolver {
 }
 
 impl StagedIslandSolver {
+    /// The joint set may have been restored from a prior world without
+    /// changing its local epochs, invalidating the cached joint builders.
+    pub(crate) fn invalidate_joint_assembly_cache(&mut self) {
+        self.staged_joints_valid = false;
+    }
+
     pub fn new() -> Self {
         Self {
             contact_constraints: ContactConstraintsSet::new(),
@@ -334,6 +344,8 @@ impl StagedIslandSolver {
             staged_joints_valid: false,
             prev_staged_active_set_epoch: 0,
             prev_staged_assembly_epoch: 0,
+            prev_staged_multibody_topology_epoch: 0,
+            prev_staged_multibody_snapshot: None,
             prev_staged_joint_indices: Vec::new(),
             prev_staged_group_bodies: Vec::new(),
             staged_group_joint_layout: Vec::new(),

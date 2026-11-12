@@ -7,6 +7,7 @@ use crate::math::Real;
 use crate::parry::bounding_volume::Aabb;
 use crate::pipeline::{EventHandler, PhysicsHooks, QueryFilter};
 use crate::prelude::{ActiveEvents, CollisionEventFlags};
+use alloc::sync::Arc;
 use parry::query::sweep_toi::Sweep;
 
 use super::sweeps::{
@@ -34,7 +35,7 @@ pub struct CCDSolver {
 
 /// The AABB loosening the cached fixed-target list was built with, paired with the list
 /// itself — `None` past [`FIXED_TARGETS_LIST_MAX`], where the sweep queries the full BVH.
-type FixedTargetsCache = (Real, Option<Vec<(ColliderHandle, Aabb)>>);
+type FixedTargetsCache = (Real, Arc<()>, Option<Vec<(ColliderHandle, Aabb)>>);
 
 impl CCDSolver {
     /// Initializes a new CCD solver
@@ -207,17 +208,20 @@ impl CCDSolver {
             let cache_valid = self
                 .fixed_targets_cache
                 .as_ref()
-                .is_some_and(|(p, _)| *p == prediction);
+                .is_some_and(|(p, snapshot, _)| {
+                    *p == prediction && Arc::ptr_eq(snapshot, &colliders.snapshot_identity)
+                });
             if !cache_valid {
                 self.fixed_targets_cache = Some((
                     prediction,
+                    colliders.snapshot_identity.clone(),
                     collect_fixed_targets(bodies, colliders, prediction),
                 ));
             }
             // Soft-body meshes deform every step without any scene change, so they are
             // gathered fresh (one AABB per mesh, not a collider scan).
             let soft = collect_soft_targets(soft_bodies, colliders, prediction);
-            let targets = match &self.fixed_targets_cache.as_ref().unwrap().1 {
+            let targets = match &self.fixed_targets_cache.as_ref().unwrap().2 {
                 Some(fixed) => CcdTargets::Lists { fixed, soft: &soft },
                 None => CcdTargets::FullBvh(bvh),
             };

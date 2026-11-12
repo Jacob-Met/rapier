@@ -377,7 +377,34 @@ impl KinematicCharacterController {
                     hit,
                 });
 
-                let hit_info = self.compute_hit_info(hit);
+                // On large boxes, the convex shape cast can report a slightly
+                // tilted contact normal even on an exactly horizontal face.
+                // A ray through the character gives the box's actual face normal.
+                let mut corrected_hit = hit;
+                if hit.normal1.dot(self.up) >= self.max_slope_climb_angle.cos()
+                    && queries.colliders[handle].shape().as_cuboid().is_some()
+                    && (queries.colliders[handle].position().rotation * self.up).dot(self.up)
+                        > 1.0 - 1.0e-6
+                {
+                    let current_pos = Pose::from_translation(result.translation) * *character_pos;
+                    let center = current_pos * character_shape.compute_local_aabb().center();
+                    let ray_lift = dims.y * 0.5 + offset;
+                    let ray = Ray::new(center + self.up * ray_lift, -self.up);
+                    if let Some((ray_handle, ray_hit)) =
+                        queries.cast_ray_and_get_normal(&ray, dims.y + 2.0 * offset + 0.05, false)
+                    {
+                        if ray_handle == handle
+                            && ray_hit.normal.dot(self.up) > 1.0 - 1.0e-6
+                            // Correct only surface contacts, not an already
+                            // embedded character being depenetrated by the solver.
+                            && ray_hit.time_of_impact >= dims.y + offset
+                            && ray_hit.normal.dot(hit.normal1) < 1.0 - 1.0e-6
+                        {
+                            corrected_hit.normal1 = ray_hit.normal;
+                        }
+                    }
+                }
+                let hit_info = self.compute_hit_info(corrected_hit);
 
                 // Try to go upstairs.
                 if !self.handle_stairs(

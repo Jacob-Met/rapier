@@ -6,7 +6,7 @@ use crate::utils;
 use na::{RealField, Vector2};
 use parry::bounding_volume::BoundingVolume;
 use parry::query::details::ShapeCastOptions;
-use parry::query::{DefaultQueryDispatcher, PersistentQueryDispatcher};
+use parry::query::{DefaultQueryDispatcher, PersistentQueryDispatcher, Ray};
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -448,6 +448,41 @@ impl KinematicCharacterController {
                 dims,
                 &mut result,
             );
+        }
+
+        // Shape casts can report the wrong time of impact on very large surfaces.
+        // A downward ray at the character's destination on the ground plane
+        // prevents the character from sinking during a descent, including a
+        // descent with horizontal movement.
+        if desired_translation.dot(self.up) < 0.0 {
+            let lateral_movement = result.translation - self.up * result.translation.dot(self.up);
+            let center =
+                *character_pos * character_shape.compute_local_aabb().center() + lateral_movement;
+            let offset = self.offset.eval(dims.y);
+            let half_height = dims.y * 0.5;
+            // Start above the character's center so a character already
+            // touching or overlapping the ground does not begin inside it.
+            let ray_lift = half_height + offset;
+            let ray = Ray::new(center + self.up * ray_lift, -self.up);
+            // The controller can snap much farther than the desired movement.
+            // Cover the movement it actually produced, not just the input.
+            let descent = (-result.translation.dot(self.up)).max(0.0);
+            if let Some((_, hit)) = queries.cast_ray_and_get_normal(
+                &ray,
+                ray_lift + half_height + offset + descent,
+                false,
+            ) {
+                let safe_descent = hit.time_of_impact - ray_lift - half_height - offset;
+                // This guard prevents new penetration but does not eject a
+                // character that was already embedded in the collider.
+                if safe_descent >= -offset
+                    && hit.normal.dot(self.up) >= self.max_slope_climb_angle.cos()
+                    && descent > safe_descent.max(0.0)
+                {
+                    result.translation += self.up * (descent - safe_descent.max(0.0));
+                    result.grounded = true;
+                }
+            }
         }
 
         // Return the result.

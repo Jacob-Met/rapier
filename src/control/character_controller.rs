@@ -601,7 +601,9 @@ impl KinematicCharacterController {
                     .filter(|rb| rb.is_kinematic());
 
                 for m in &manifolds {
-                    if self.is_grounded_at_contact_manifold(m, character_pos, dims) {
+                    let is_ground_contact =
+                        self.is_grounded_at_contact_manifold(m, character_pos, dims);
+                    if is_ground_contact {
                         grounded = true;
                     }
 
@@ -616,12 +618,31 @@ impl KinematicCharacterController {
                                 let contact_point = collider.position() * contact.local_p2;
                                 let target_vel = kinematic_parent.velocity_at_point(contact_point);
 
-                                let normal_target_mvt = target_vel.dot(normal) * dt;
+                                let normal_platform_mvt = target_vel.dot(normal) * dt;
                                 let normal_current_mvt = translation_remaining.dot(normal);
 
                                 manifold_center += contact_point;
-                                *translation_remaining +=
-                                    normal * (normal_target_mvt - normal_current_mvt);
+                                if is_ground_contact
+                                    && normal.dot(self.up) >= self.max_slope_climb_angle.cos()
+                                {
+                                    // Keep a separating nudge while walking on
+                                    // a kinematic floor. Without it a stationary
+                                    // platform removes the nudge, making every
+                                    // subsequent cast hit at TOI=0.
+                                    let target = normal_platform_mvt + self.normal_nudge_factor;
+                                    if normal_current_mvt < target
+                                        || (normal_platform_mvt < 0.0
+                                            && normal_current_mvt <= self.normal_nudge_factor)
+                                    {
+                                        *translation_remaining +=
+                                            normal * (target - normal_current_mvt);
+                                    }
+                                } else {
+                                    // Preserve regular collision response for
+                                    // walls and other kinematic characters.
+                                    *translation_remaining +=
+                                        normal * (normal_platform_mvt - normal_current_mvt);
+                                }
                             }
                         }
 

@@ -14,7 +14,7 @@ pub(crate) type JointIndex = usize;
 pub(crate) type JointGraphEdge = crate::data::graph::Edge<ImpulseJoint>;
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Default, Debug)]
+#[derive(Default, Debug)]
 /// The collection that stores all joints connecting rigid bodies in your physics world.
 ///
 /// Joints constrain how two bodies can move relative to each other. This set manages
@@ -72,6 +72,24 @@ pub struct ImpulseJointSet {
     /// identical, so the caller's previous output is reused untouched.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
     selection_epochs: Option<(u32, u32)>,
+}
+
+impl Clone for ImpulseJointSet {
+    fn clone(&self) -> Self {
+        Self {
+            rb_graph_ids: self.rb_graph_ids.clone(),
+            joint_ids: self.joint_ids.clone(),
+            joint_graph: self.joint_graph.clone(),
+            to_wake_up: self.to_wake_up.clone(),
+            to_join: self.to_join.clone(),
+            island_events: self.island_events.clone(),
+            modified_joints: self.modified_joints.clone(),
+            all_joints_modified: self.all_joints_modified,
+            assembly_epoch: self.assembly_epoch,
+            // Selection indices live in the originating pipeline, not in this snapshot.
+            selection_epochs: None,
+        }
+    }
 }
 
 impl ImpulseJointSet {
@@ -559,13 +577,13 @@ impl ImpulseJointSet {
         islands: &IslandManager,
         bodies: &RigidBodySet,
         out: &mut Vec<JointIndex>,
-    ) {
+    ) -> bool {
         // The selection depends only on the active-set epoch and the assembly epoch: while both
         // are unchanged, `out` (assumed to be the previous call's output, which the physics
         // pipeline keeps around) and the stamped solver-body ids are still exact.
         let epochs = (islands.active_set_epoch, self.assembly_epoch);
         if self.selection_epochs == Some(epochs) {
-            return;
+            return false;
         }
         self.selection_epochs = Some(epochs);
 
@@ -622,6 +640,8 @@ impl ImpulseJointSet {
                 out.push(i);
             }
         }
+
+        true
     }
 
     /// Removes a joint from the world.

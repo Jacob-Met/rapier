@@ -309,6 +309,10 @@ pub(crate) struct StagedIslandSolver {
 }
 
 impl StagedIslandSolver {
+    pub(crate) fn invalidate_joint_cache(&mut self) {
+        self.staged_joints_valid = false;
+    }
+
     pub fn new() -> Self {
         Self {
             contact_constraints: ContactConstraintsSet::new(),

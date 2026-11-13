@@ -795,7 +795,13 @@ pub(super) fn process_pair(
     // Composite pairs have unstable manifold ordinals (see `OUTCOME_FULL_COMPOSITE`),
     // so signal a full rebuild. Must be checked before the `FULL_CLEAN` shortcut: a
     // surviving manifold can look "clean" while a dropped sibling leaked its graph slot.
-    if outcome == OUTCOME_FULL && pair.rigid().is_some_and(|r| r.workspace.is_some()) {
+    // Voxels contact queries can emit multiple cell manifolds without a
+    // persistent workspace. Their manifold ordinals still change when a ball
+    // moves between cells, so they need the same graph rebuild as composites.
+    let composite = pair.rigid().is_some_and(|r| r.workspace.is_some())
+        || co1.shape.as_voxels().is_some()
+        || co2.shape.as_voxels().is_some();
+    if outcome == OUTCOME_FULL && composite {
         return OUTCOME_FULL_COMPOSITE;
     }
     if outcome == OUTCOME_FULL && !membership_changed {

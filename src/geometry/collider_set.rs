@@ -360,6 +360,12 @@ impl ColliderSet {
         new_parent_handle: Option<RigidBodyHandle>,
         bodies: &mut RigidBodySet,
     ) {
+        // Reject stale generational handles before detaching the old parent.
+        // A partial reparent leaves a dangling reference that panics on step.
+        if new_parent_handle.is_some_and(|parent| bodies.get(parent).is_none()) {
+            return;
+        }
+
         let parent_enabled = new_parent_handle
             .and_then(|parent| bodies.get(parent))
             .is_none_or(|body| body.is_enabled());
@@ -714,5 +720,29 @@ mod tests {
         world.step();
         assert!(!world.colliders[collider].is_enabled());
         assert!(!touching(&world));
+    }
+
+    #[test]
+    fn invalid_parent_handle_preserves_existing_parent_and_step() {
+        let mut world = PhysicsWorld::new();
+        let (body, collider) =
+            world.insert(RigidBodyBuilder::dynamic(), ColliderBuilder::ball(0.5));
+
+        // A stale generational handle is easy to encounter after despawning.
+        let stale_parent = world.insert_body(RigidBodyBuilder::fixed());
+        world.remove_body(stale_parent).unwrap();
+        let reused = world.insert_body(RigidBodyBuilder::fixed());
+        assert_ne!(reused, stale_parent);
+        assert!(world.bodies.get(stale_parent).is_none());
+
+        world
+            .colliders
+            .set_parent(collider, Some(stale_parent), &mut world.bodies);
+        assert_eq!(world.colliders[collider].parent(), Some(body));
+        assert!(world.bodies[body].colliders().contains(&collider));
+
+        // This used to panic when the pipeline indexed the dangling parent.
+        world.step();
+        assert_eq!(world.colliders[collider].parent(), Some(body));
     }
 }

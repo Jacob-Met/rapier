@@ -4,7 +4,7 @@ use crate::data::{HasModifiedFlag, ModifiedObjects};
 use crate::dynamics::{
     IslandManager, RigidBodyHandle, RigidBodySet, SoftBindingError, SoftBodySet, SoftMeshBinding,
 };
-use crate::geometry::{Collider, ColliderChanges, ColliderHandle, ColliderParent};
+use crate::geometry::{Collider, ColliderChanges, ColliderEnabled, ColliderHandle, ColliderParent};
 use crate::math::{DIM, Pose, Vector};
 use alloc::sync::Arc;
 use core::ops::{Index, IndexMut};
@@ -360,6 +360,9 @@ impl ColliderSet {
         new_parent_handle: Option<RigidBodyHandle>,
         bodies: &mut RigidBodySet,
     ) {
+        let parent_enabled = new_parent_handle
+            .and_then(|parent| bodies.get(parent))
+            .is_none_or(|body| body.is_enabled());
         if let Some(collider) = self.get_mut(handle) {
             let curr_parent = collider.parent.map(|p| p.handle);
             if new_parent_handle == curr_parent {
@@ -396,6 +399,20 @@ impl ColliderSet {
                     }
                 }
                 None => collider.parent = None,
+            }
+
+            // An inherited enabled state belongs to the current parent, not
+            // the previous one. Explicitly disabled colliders stay disabled.
+            if collider.flags.enabled != ColliderEnabled::Disabled {
+                let enabled = if parent_enabled {
+                    ColliderEnabled::Enabled
+                } else {
+                    ColliderEnabled::DisabledByParent
+                };
+                if collider.flags.enabled != enabled {
+                    collider.flags.enabled = enabled;
+                    collider.changes |= ColliderChanges::ENABLED_OR_DISABLED;
+                }
             }
         }
     }
@@ -626,4 +643,76 @@ fn mesh_geometry(
         return Err(SoftBindingError::DegenerateMesh);
     }
     Ok((vertices, indices))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::prelude::*;
+
+    #[test]
+    fn reparented_collider_uses_its_new_parents_enabled_state() {
+        let mut world = PhysicsWorld::new();
+        world.gravity = Vector::ZERO;
+        let disabled = world
+            .bodies
+            .insert(RigidBodyBuilder::fixed().enabled(false));
+        let enabled = world.bodies.insert(RigidBodyBuilder::fixed());
+        let collider = world.colliders.insert_with_parent(
+            ColliderBuilder::ball(0.5),
+            disabled,
+            &mut world.bodies,
+        );
+        let (_, other) = world.insert(
+            RigidBodyBuilder::dynamic()
+                .can_sleep(false)
+                .lock_translations()
+                .lock_rotations(),
+            ColliderBuilder::ball(0.5),
+        );
+        let touching = |w: &PhysicsWorld| {
+            w.narrow_phase
+                .contact_pair(collider, other)
+                .is_some_and(|pair| pair.has_any_active_contact())
+        };
+
+        world.step();
+        assert!(!world.colliders[collider].is_enabled());
+        assert!(!touching(&world));
+
+        world
+            .colliders
+            .set_parent(collider, Some(enabled), &mut world.bodies);
+        world.step();
+        assert!(
+            world.colliders[collider].is_enabled(),
+            "the collider should be active after moving to an enabled body"
+        );
+        assert!(
+            touching(&world),
+            "the reparented collider must generate contacts"
+        );
+
+        world
+            .colliders
+            .set_parent(collider, Some(disabled), &mut world.bodies);
+        world.step();
+        assert!(!world.colliders[collider].is_enabled());
+        assert!(!touching(&world));
+
+        world
+            .colliders
+            .set_parent(collider, None, &mut world.bodies);
+        world.step();
+        assert!(world.colliders[collider].is_enabled());
+        assert!(touching(&world), "a standalone collider must become active");
+
+        // User-explicit disabling is independent of the parent and must survive.
+        world.colliders[collider].set_enabled(false);
+        world
+            .colliders
+            .set_parent(collider, Some(enabled), &mut world.bodies);
+        world.step();
+        assert!(!world.colliders[collider].is_enabled());
+        assert!(!touching(&world));
+    }
 }

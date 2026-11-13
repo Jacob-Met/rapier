@@ -265,24 +265,62 @@ impl KinematicCharacterController {
                 let character_pos = Pose::from_translation(result.translation) * *character_pos;
                 let pos12 = character_pos.inv_mul(collider.position());
 
+                let mut correction = None;
                 if let Ok(Some(contact)) =
                     queries
                         .dispatcher
                         .contact(&pos12, character_shape, collider.shape(), 0.0)
                 {
                     if contact.dist < -1.0e-5 {
-                        // Push out until the usual `offset` gap is restored.
-                        let push = (offset - contact.dist).min(max_correction - applied);
-                        if push <= 0.0 {
-                            return; // The per-call correction budget is exhausted.
-                        }
-
-                        // `normal1` (expressed in the character’s local frame) points towards
-                        // the obstacle: move backwards along it to resolve the overlap.
-                        result.translation -= (character_pos.rotation * contact.normal1) * push;
-                        applied += push;
-                        corrected = true;
+                        // The character's local normal points toward the obstacle.
+                        correction = Some((
+                            -(character_pos.rotation * contact.normal1),
+                            offset - contact.dist,
+                        ));
                     }
+                }
+
+                // Capsule/cuboid GJK contacts can report a diagonal near-zero
+                // distance even when the bottom sphere is penetrating a broad
+                // face. The cuboid's point projection is analytic, so use the
+                // two cap spheres to recover their actual separation.
+                if let (Some(capsule), Some(_cuboid)) =
+                    (character_shape.as_capsule(), collider.shape().as_cuboid())
+                {
+                    for endpoint in [capsule.segment.a, capsule.segment.b] {
+                        let center = character_pos.transform_point(endpoint);
+                        let projection =
+                            collider
+                                .shape()
+                                .project_point(collider.position(), center, false);
+                        let delta = if projection.is_inside {
+                            projection.point - center
+                        } else {
+                            center - projection.point
+                        };
+                        let distance = delta.length();
+                        let signed_distance = if projection.is_inside {
+                            -distance
+                        } else {
+                            distance
+                        };
+                        let push = offset + capsule.radius - signed_distance;
+                        if push > 1.0e-5
+                            && correction.is_none_or(|(_, current_push)| push > current_push)
+                        {
+                            correction = Some((delta.try_normalize().unwrap_or(self.up), push));
+                        }
+                    }
+                }
+
+                if let Some((normal, distance)) = correction {
+                    let push = distance.min(max_correction - applied);
+                    if push <= 0.0 {
+                        return; // The per-call correction budget is exhausted.
+                    }
+                    result.translation += normal * push;
+                    applied += push;
+                    corrected = true;
                 }
             }
 
@@ -445,6 +483,19 @@ impl KinematicCharacterController {
                 queries,
                 character_shape,
                 &(Pose::from_translation(result.translation) * *character_pos),
+                dims,
+                &mut result,
+            );
+        }
+
+        // Shape casting against broad cuboid faces can miss a floor in some
+        // orientations. Correct actual overlap even when the starting grounded
+        // query or the shape cast missed the contact.
+        if desired_translation.dot(self.up) <= 0.0 && character_shape.as_capsule().is_some() {
+            self.check_and_fix_penetrations(
+                queries,
+                character_shape,
+                character_pos,
                 dims,
                 &mut result,
             );
@@ -1492,5 +1543,103 @@ mod test {
         // left alone.
         assert!(bodies[box_ahead].linvel().x > 0.0);
         assert_eq!(bodies[box_beside].linvel(), Vector::ZERO);
+    }
+
+    #[test]
+    fn character_controller_does_not_fall_through_large_cuboid() {
+        fn settle(half_extent: Real, x: Real, z: Real, offset: Real, nudge: Real) -> (Real, Real) {
+            let mut bodies = RigidBodySet::new();
+            let mut colliders = ColliderSet::new();
+            let floor =
+                bodies.insert(RigidBodyBuilder::fixed().translation(Vector::new(0.0, -0.5, 0.0)));
+            colliders.insert_with_parent(
+                ColliderBuilder::cuboid(half_extent, 0.5, half_extent),
+                floor,
+                &mut bodies,
+            );
+            let mut broad = BroadPhaseBvh::new();
+            let mut narrow = NarrowPhase::new();
+            PhysicsPipeline::new().step(
+                Vector::new(0.0, -32.0, 0.0),
+                &IntegrationParameters::default(),
+                &mut IslandManager::new(),
+                &mut broad,
+                &mut narrow,
+                &mut bodies,
+                &mut colliders,
+                &mut ImpulseJointSet::new(),
+                &mut MultibodyJointSet::new(),
+                &mut SoftBodySet::new(),
+                &mut CCDSolver::new(),
+                &(),
+                &(),
+            );
+
+            let capsule = Capsule::new_y(0.55, 0.35);
+            let mut pos = Vector::new(x, 0.95, z);
+            let mut vy = 0.0;
+            let mut low = Real::MAX;
+            let dt = 1.0 / 60.0;
+            let controller = KinematicCharacterController {
+                up: Vector::Y,
+                offset: CharacterLength::Absolute(offset),
+                slide: true,
+                autostep: None,
+                max_slope_climb_angle: 50f32.to_radians(),
+                min_slope_slide_angle: 50f32.to_radians(),
+                snap_to_ground: Some(CharacterLength::Absolute(0.3)),
+                normal_nudge_factor: nudge,
+            };
+
+            for _ in 0..120 {
+                vy -= 32.0 * dt;
+                let queries = broad.as_query_pipeline(
+                    narrow.query_dispatcher(),
+                    &bodies,
+                    &colliders,
+                    QueryFilter::default(),
+                );
+                let mvt = controller.move_shape(
+                    dt,
+                    &queries,
+                    &capsule,
+                    &Pose::from_translation(pos),
+                    Vector::new(0.0, vy * dt, 0.0),
+                    |_| {},
+                );
+                pos += mvt.translation;
+                if mvt.grounded {
+                    vy = 0.0;
+                }
+                low = low.min(pos.y - 0.9);
+            }
+            (low, pos.y - 0.9)
+        }
+
+        let spots = [
+            (-97.0, 6.0),
+            (-97.0, 1.0),
+            (-41.0, -83.0),
+            (-41.0, -3.0),
+            (6.0, 6.0),
+            (0.0, 0.0),
+            (300.0, -200.0),
+            (0.0, -3.0),
+            (23.0, 14.0),
+        ];
+        for half_extent in [25.0, 150.0, 1024.0] {
+            for (nudge, offset) in [(1.0e-4, 0.02), (1.0e-4, 0.05), (1.0e-3, 0.02)] {
+                for (x, z) in spots {
+                    if x.abs() >= half_extent || z.abs() >= half_extent {
+                        continue;
+                    }
+                    let (low, end) = settle(half_extent, x, z, offset, nudge);
+                    assert!(
+                        low >= -0.005 && end >= 0.0,
+                        "cuboid {half_extent}, ({x},{z}), offset {offset}, nudge {nudge}: low {low}, end {end}"
+                    );
+                }
+            }
+        }
     }
 }

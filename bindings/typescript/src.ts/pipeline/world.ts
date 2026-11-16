@@ -297,8 +297,11 @@ export class World {
             eventQueue,
             hooks,
         );
-        // Tears split pieces off into soft bodies of their own, with proxies and colliders.
-        this.mapNewSoftBodies();
+        // Only soft bodies can tear and create proxies during a step. Without them,
+        // mapping would rescan every rigid body and collider on every frame.
+        if (this.softBodies.raw.len() > 0) {
+            this.mapNewSoftBodies();
+        }
     }
 
     /**

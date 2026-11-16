@@ -415,17 +415,6 @@ impl SoftBody {
         &mut self,
         dead: &[bool],
     ) -> (SoftClusterRemoval, Vec<u32>) {
-        self.remove_dead_particles_with_cell_ids(dead, None)
-    }
-
-    /// Like remove_dead_particles, but cells were already partitioned into a fragment.
-    /// The supplied ids map retained cell positions back to the source mesh's cell ids,
-    /// so skinned collision vertices still follow the correct original cell.
-    pub(crate) fn remove_dead_particles_with_cell_ids(
-        &mut self,
-        dead: &[bool],
-        original_cells: Option<(usize, &[u32])>,
-    ) -> (SoftClusterRemoval, Vec<u32>) {
         let mut counts = SoftClusterRemoval::default();
         if !dead.contains(&true) {
             return (counts, Vec::new());
@@ -547,16 +536,8 @@ impl SoftBody {
 
         // The meshes follow the renumbered particles and cells; their contact caches hold stale
         // ids.
-        let mesh_cell_remap = original_cells.map(|(source_len, original_ids)| {
-            debug_assert_eq!(original_ids.len(), cell_remap.len());
-            let mut source_to_fragment = vec![u32::MAX; source_len];
-            for (&original, &current) in original_ids.iter().zip(&cell_remap) {
-                source_to_fragment[original as usize] = current;
-            }
-            source_to_fragment
-        });
         let remap_tables = super::collision_mesh::SoftTopologyRemap {
-            cells: mesh_cell_remap.as_deref().unwrap_or(&cell_remap),
+            cells: &cell_remap,
             particles: &remap,
             split: &[],
             inserted: &[],

@@ -1219,6 +1219,7 @@ impl Multibody {
                 j_id2: j_id,
                 joint_id: usize::MAX, // internal: no impulse writeback.
                 impulse: 0.0,
+                previous_substeps_impulse: 0.0,
                 impulse_bounds: [-Real::MAX, Real::MAX],
                 inv_lhs: crate::utils::inv(lhs),
                 rhs: drift * erp_inv_dt,

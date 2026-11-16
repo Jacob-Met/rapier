@@ -326,6 +326,13 @@ impl PhysicsPipeline {
         self.counters.step_started();
         self.quarantine.clear();
 
+        // Zero inactive joints too; CCD substeps contribute to the same readout.
+        for (_, joint) in impulse_joints.iter_mut() {
+            for motor in &mut joint.data.motors {
+                motor.total_impulse = 0.0;
+            }
+        }
+
         // Apply some of delayed wake-ups.
         self.counters.stages.user_changes.start();
         #[cfg(feature = "enhanced-determinism")]

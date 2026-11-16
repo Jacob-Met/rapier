@@ -73,6 +73,7 @@ pub struct JointConstraint<N: ScalarType, const LANES: usize> {
     pub joint_id: [JointIndex; LANES],
 
     pub impulse: N,
+    pub previous_substeps_impulse: N,
     pub impulse_bounds: [N; 2],
     pub lin_jac: N::Vector,
     pub ang_jac1: N::AngVector,
@@ -382,7 +383,10 @@ impl JointConstraint<Real, 1> {
         match self.writeback_id {
             WritebackId::Dof(i) => joint.impulses[i] = self.impulse,
             WritebackId::Limit(i) => joint.data.limits[i].impulse = self.impulse,
-            WritebackId::Motor(i) => joint.data.motors[i].impulse = self.impulse,
+            WritebackId::Motor(i) => {
+                joint.data.motors[i].impulse = self.impulse;
+                joint.data.motors[i].total_impulse += self.previous_substeps_impulse + self.impulse;
+            }
             WritebackId::Friction(_) => {}
         }
     }
@@ -528,6 +532,7 @@ impl JointConstraint<SimdReal, SIMD_WIDTH> {
 
     pub fn writeback_impulses(&self, joints_all: &mut [JointGraphEdge]) {
         let impulses: [_; SIMD_WIDTH] = self.impulse.into();
+        let accumulated: [_; SIMD_WIDTH] = self.previous_substeps_impulse.into();
 
         // TODO: should we move the iteration on ii deeper in the nested match?
         for ii in 0..SIMD_WIDTH {
@@ -535,7 +540,10 @@ impl JointConstraint<SimdReal, SIMD_WIDTH> {
             match self.writeback_id {
                 WritebackId::Dof(i) => joint.impulses[i] = impulses[ii],
                 WritebackId::Limit(i) => joint.data.limits[i].impulse = impulses[ii],
-                WritebackId::Motor(i) => joint.data.motors[i].impulse = impulses[ii],
+                WritebackId::Motor(i) => {
+                    joint.data.motors[i].impulse = impulses[ii];
+                    joint.data.motors[i].total_impulse += accumulated[ii] + impulses[ii];
+                }
                 WritebackId::Friction(_) => {}
             }
         }

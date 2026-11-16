@@ -22,6 +22,7 @@ pub struct GenericJointConstraint {
     pub joint_id: JointIndex,
 
     pub impulse: Real,
+    pub previous_substeps_impulse: Real,
     pub impulse_bounds: [Real; 2],
     pub inv_lhs: Real,
     pub rhs: Real,
@@ -51,6 +52,7 @@ impl GenericJointConstraint {
             j_id2: usize::MAX,
             joint_id: usize::MAX,
             impulse: 0.0,
+            previous_substeps_impulse: 0.0,
             impulse_bounds: [-Real::MAX, Real::MAX],
             inv_lhs: Real::MAX,
             rhs: Real::MAX,
@@ -312,7 +314,11 @@ impl GenericJointConstraint {
             match self.writeback_id {
                 WritebackId::Dof(i) => joint.impulses[i] = self.impulse,
                 WritebackId::Limit(i) => joint.data.limits[i].impulse = self.impulse,
-                WritebackId::Motor(i) => joint.data.motors[i].impulse = self.impulse,
+                WritebackId::Motor(i) => {
+                    joint.data.motors[i].impulse = self.impulse;
+                    joint.data.motors[i].total_impulse +=
+                        self.previous_substeps_impulse + self.impulse;
+                }
                 // Writeback not supported yet for internal friction.
                 WritebackId::Friction(_) => {}
             }

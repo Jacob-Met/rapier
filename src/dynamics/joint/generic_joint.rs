@@ -213,6 +213,10 @@ pub struct JointMotor {
     pub max_force: Real,
     /// Internal: current impulse being applied.
     pub impulse: Real,
+    /// Signed motor impulse summed across all substeps of the last PhysicsPipeline step.
+    /// Unlike impulse, this is not only the last solver substep's impulse.
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    pub total_impulse: Real,
     /// Force-based or acceleration-based motor model.
     pub model: MotorModel,
 }
@@ -226,6 +230,7 @@ impl Default for JointMotor {
             damping: 0.0,
             max_force: Real::MAX,
             impulse: 0.0,
+            total_impulse: 0.0,
             model: MotorModel::AccelerationBased,
         }
     }

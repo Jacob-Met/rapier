@@ -463,6 +463,7 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                             match builder {
                                 GenericJointConstraintBuilder::External(b) => b.update(
                                     params,
+                                    substep_id,
                                     multibodies,
                                     solver_bodies,
                                     generic_jacobians,

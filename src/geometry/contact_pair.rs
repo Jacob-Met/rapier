@@ -706,6 +706,9 @@ pub struct ContactManifoldData {
     /// world-attached side (fixed, sleeping, no body). Stamped by constraint selection so
     /// the assembly never re-reads the rigid-body set.
     pub(crate) solver_body_ids: [u32; 2],
+    /// A centered ball's normal separation follows its center, not a rotating material anchor.
+    #[cfg_attr(feature = "serde-serialize", serde(default))]
+    pub(crate) centered_ball: [bool; 2],
     /// This manifold's persistent position (bucket + index) in the narrow-phase's
     /// `SolverContactGraph`, maintained incrementally so the solver reads a ready color-grouped
     /// contact list without re-selecting/re-sorting. `GraphPos::NONE` when not solver-active.
@@ -961,6 +964,7 @@ impl ContactManifoldData {
             solver_flags,
             solver_color: SOLVER_COLOR_UNCOLORED,
             solver_body_ids: [u32::MAX; 2],
+            centered_ball: [false; 2],
             graph_pos: crate::dynamics::solver::solver_contact_graph::GraphPos::NONE,
             normal: Vector::ZERO,
             solver_contacts: SolverContacts::new(),

@@ -46,6 +46,9 @@ pub(crate) struct ContactWithCoulombFrictionBuilder {
     /// The pair's restitution coefficient (needed by `update` to recompute the
     /// restitution rhs seed).
     restitution: SimdReal,
+    /// One SIMD lane mask per manifold side (0 or 1). Friction keeps material anchors.
+    normal_centered1: SimdReal,
+    normal_centered2: SimdReal,
 }
 
 impl ContactWithCoulombFrictionBuilder {
@@ -148,6 +151,14 @@ impl ContactWithCoulombFrictionBuilder {
         out_constraint.num_contacts = num_points as u8;
         out_builder.local_n1 = poses1.rotation.inverse() * force_dir1;
         out_builder.restitution = restitution;
+        let centered1 = SimdReal::from(array![
+            |ii| manifolds[ii].data.centered_ball[0] as u32 as Real
+        ]);
+        let centered2 = SimdReal::from(array![
+            |ii| manifolds[ii].data.centered_ball[1] as u32 as Real
+        ]);
+        out_builder.normal_centered1 = centered1;
+        out_builder.normal_centered2 = centered2;
         #[cfg(feature = "dim3")]
         {
             out_constraint.tangent1 = tangents1[0];
@@ -198,7 +209,6 @@ impl ContactWithCoulombFrictionBuilder {
             // passes through). Recycled contacts are updated here, not per frame by the narrow phase.
             let p1 = poses1.transform_point(solver_contact.anchor1);
             let p2 = poses2.transform_point(solver_contact.anchor2);
-            let dist = (p1 - p2).gdot(force_dir1);
 
             // Lever arms are the world-space arms frozen at the pair's last full narrow-phase
             // update (anchor freezing, `ContactData::solver_dp1`) — NOT re-derived
@@ -208,6 +218,14 @@ impl ContactWithCoulombFrictionBuilder {
                 <SimdReal as ScalarType>::Vector::from(gather![|ii| pt_data(ii).solver_dp1.into()]);
             let dp2 =
                 <SimdReal as ScalarType>::Vector::from(gather![|ii| pt_data(ii).solver_dp2.into()]);
+
+            // Rigid anchors on a sphere rotate away from the geometric support point.
+            // On recycled contacts reconstruct the normal points from the frozen
+            // midpoint arms, then split the frozen contact distance across the sides.
+            let half_dist = solver_contact.dist * SimdReal::splat(0.5);
+            let p1_normal = p1 + (world_com1 + dp1 + force_dir1 * half_dist - p1) * centered1;
+            let p2_normal = p2 + (world_com2 + dp2 - force_dir1 * half_dist - p2) * centered2;
+            let dist = (p1_normal - p2_normal).gdot(force_dir1);
 
             let vel1 = vels1.linear + vels1.angular.gcross(dp1);
             let vel2 = vels2.linear + vels2.angular.gcross(dp2);
@@ -309,8 +327,9 @@ impl ContactWithCoulombFrictionBuilder {
             // Rebased so the per-substep tracking `info.dist + (p1 - p2)·n` is a pure delta
             // from the build-time poses (a base separation): with frozen arms, `p1 - p2`
             // is non-zero at build time on recycled pairs (drift since the freeze, already in `dist`).
-            out_builder.infos[k].dist =
-                dist - ((world_com1 + dp1) - (world_com2 + dp2)).gdot(force_dir1);
+            let base_p1 = world_com1 + dp1 * (SimdReal::splat(1.0) - centered1);
+            let base_p2 = world_com2 + dp2 * (SimdReal::splat(1.0) - centered2);
+            out_builder.infos[k].dist = dist - (base_p1 - base_p2).gdot(force_dir1);
             out_builder.infos[k].restitution_seed = restitution_seed;
         }
 
@@ -410,7 +429,9 @@ impl ContactWithCoulombFrictionBuilder {
             // NOTE: the tangent velocity is equivalent to an additional movement of the first body’s surface.
             let p1 = poses1.transform_point(info.local_p1) + info.tangent_vel * solved_dt;
             let p2 = poses2.transform_point(info.local_p2);
-            let dist = info.dist + (p1 - p2).gdot(constraint.dir1);
+            let normal_p1 = p1 + (poses1.translation - p1) * self.normal_centered1;
+            let normal_p2 = p2 + (poses2.translation - p2) * self.normal_centered2;
+            let dist = info.dist + (normal_p1 - normal_p2).gdot(constraint.dir1);
 
             // Normal part.
             {
@@ -479,7 +500,9 @@ impl ContactWithCoulombFrictionBuilder {
         {
             let p1 = poses1.transform_point(info.local_p1) + info.tangent_vel * solved_dt;
             let p2 = poses2.transform_point(info.local_p2);
-            let dist = info.dist + (p1 - p2).gdot(constraint.dir1);
+            let normal_p1 = p1 + (poses1.translation - p1) * self.normal_centered1;
+            let normal_p2 = p2 + (poses2.translation - p2) * self.normal_centered2;
+            let dist = info.dist + (normal_p1 - normal_p2).gdot(constraint.dir1);
             // See `update`: the restitution seed is applied by `apply_restitution`, not here.
             normal_part.rhs = dist.simd_max(SimdReal::zero()) * inv_dt;
             normal_part.cfm_factor = SimdReal::splat(1.0);

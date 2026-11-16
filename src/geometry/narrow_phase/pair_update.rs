@@ -666,6 +666,22 @@ pub(super) fn process_pair(
                 };
                 let com_pose1 = rb1.as_ref().filter(|_| rel_dom <= 0).map(com_pose);
                 let com_pose2 = rb2.as_ref().filter(|_| rel_dom >= 0).map(com_pose);
+                // The material point on a rolling ball rotates away from the current
+                // support point. Only a ball centered on the body's CoM can track
+                // normal separation using its translation alone.
+                let centered_ball =
+                    |co: &crate::geometry::Collider, rb: Option<&crate::dynamics::RigidBody>| {
+                        co.shape().as_ball().is_some()
+                            && rb.zip(co.position_wrt_parent()).is_some_and(|(rb, pos)| {
+                                (pos.translation - rb.mprops.local_mprops.local_com)
+                                    .length_squared()
+                                    <= Real::EPSILON * Real::EPSILON
+                            })
+                    };
+                manifold.data.centered_ball = [
+                    com_pose1.is_some() && centered_ball(co1, rb1),
+                    com_pose2.is_some() && centered_ball(co2, rb2),
+                ];
                 // Split-borrow: the frozen solver arms are written to the
                 // manifold points while iterating the solver contacts.
                 let manifold_points = &mut manifold.points;

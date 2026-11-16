@@ -738,3 +738,54 @@ fn contact_force_events_follow_runtime_active_events_flips() {
     }
     assert_eq!(events.0.load(Ordering::Relaxed), after_enable);
 }
+
+#[cfg(feature = "dim3")]
+#[test]
+fn rolling_ball_does_not_sink_into_the_ground() {
+    use crate::dynamics::FrictionModel;
+    use crate::pipeline::PhysicsWorld;
+
+    fn penetration(model: FrictionModel, rolling: bool, ball_first: bool) -> crate::math::Real {
+        let mut world = PhysicsWorld::new();
+        world.integration_parameters.friction_model = model;
+        let ball = RigidBodyBuilder::dynamic()
+            .translation(Vector::new(-50.0, 0.1, 0.0))
+            .linvel(Vector::new(2.0, 0.0, 0.0))
+            .angvel(Vector::new(0.0, 0.0, if rolling { -20.0 } else { 0.0 }))
+            .can_sleep(false);
+        let collider = ColliderBuilder::ball(0.1).friction(if rolling { 0.5 } else { 0.0 });
+        let ground = ColliderBuilder::cuboid(100.0, 0.5, 100.0)
+            .translation(Vector::new(0.0, -0.5, 0.0))
+            .build();
+        if !ball_first {
+            world.colliders.insert(ground.clone());
+        }
+        let (handle, _) = world.insert(ball, collider);
+        if ball_first {
+            world.colliders.insert(ground);
+        }
+
+        let mut worst = 0.0;
+        for tick in 0..120 {
+            world.step();
+            if tick >= 60 {
+                let depth = 0.1 - world.bodies[handle].translation().y;
+                if depth > worst {
+                    worst = depth;
+                }
+            }
+        }
+        worst
+    }
+
+    for model in [FrictionModel::Simplified, FrictionModel::Coulomb] {
+        for ball_first in [false, true] {
+            let rolling = penetration(model, true, ball_first);
+            let sliding = penetration(model, false, ball_first);
+            assert!(
+                rolling <= sliding + 0.00015,
+                "{model:?}, ball first {ball_first}: rolling penetration {rolling} vs sliding {sliding}"
+            );
+        }
+    }
+}

@@ -538,14 +538,18 @@ impl KinematicCharacterController {
                     .filter(|rb| rb.is_kinematic());
 
                 for m in &manifolds {
-                    if self.is_grounded_at_contact_manifold(m, character_pos, dims) {
-                        grounded = true;
-                    }
+                    let on_ground = self.is_grounded_at_contact_manifold(m, character_pos, dims);
+                    grounded |= on_ground;
 
                     if let Some(kinematic_parent) = kinematic_parent {
                         let mut num_active_contacts = 0;
                         let mut manifold_center = Vector::ZERO;
                         let normal = -(character_pos.rotation * m.local_n1);
+                        // Only contact surfaces the character can climb need a
+                        // separation nudge. Side contacts with moving kinematic
+                        // obstacles must keep their original normal correction.
+                        let preserve_ground_nudge =
+                            on_ground && normal.dot(self.up) >= self.max_slope_climb_angle.cos();
 
                         for contact in &m.points {
                             if contact.dist <= prediction {
@@ -557,8 +561,18 @@ impl KinematicCharacterController {
                                 let normal_current_mvt = translation_remaining.dot(normal);
 
                                 manifold_center += contact_point;
+                                // Keep the last shape cast's separation nudge on
+                                // climbable kinematic floors, or repeated zero-TOI
+                                // hits will exhaust the movement iterations.
+                                let nudge = if preserve_ground_nudge {
+                                    (normal_current_mvt - normal_target_mvt)
+                                        .max(0.0)
+                                        .min(self.normal_nudge_factor)
+                                } else {
+                                    0.0
+                                };
                                 *translation_remaining +=
-                                    normal * (normal_target_mvt - normal_current_mvt);
+                                    normal * (normal_target_mvt + nudge - normal_current_mvt);
                             }
                         }
 

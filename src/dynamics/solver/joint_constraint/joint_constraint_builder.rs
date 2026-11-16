@@ -117,10 +117,16 @@ impl JointConstraintBuilder {
         // configuration, so it is stable across the substeps of a step).
         const MAX_ROWS: usize = 4 * SPATIAL_DIM;
         let mut prev_impulses = [0.0; MAX_ROWS];
-        if warmstart.is_some() && substep_id > 0 {
+        let mut previous_substeps = [0.0; MAX_ROWS];
+        if substep_id > 0 {
             let count = joint_data_num_constraints(&self.joint).min(MAX_ROWS);
-            for (prev, row) in prev_impulses[..count].iter_mut().zip(out_rows.iter()) {
+            for ((prev, sum), row) in prev_impulses[..count]
+                .iter_mut()
+                .zip(previous_substeps.iter_mut())
+                .zip(out_rows.iter())
+            {
                 *prev = row.impulse;
+                *sum = row.previous_substeps_impulse + row.impulse;
             }
         }
 
@@ -135,6 +141,9 @@ impl JointConstraintBuilder {
             &self.ang_limits,
             out_rows,
         );
+        for (row, sum) in out_rows[..len].iter_mut().zip(previous_substeps.iter()) {
+            row.previous_substeps_impulse = *sum;
+        }
 
         if let Some(coeff) = warmstart {
             if substep_id == 0 {
@@ -456,12 +465,18 @@ impl JointConstraintBuilderSimd {
         // (uncoupled) limited axis; the masks are disjoint.
         const MAX_WIDE_ROWS: usize = SPATIAL_DIM + 1;
         let mut prev_impulses = [SimdReal::splat(0.0); MAX_WIDE_ROWS];
-        if warmstart.is_some() && substep_id > 0 {
+        let mut previous_substeps = [SimdReal::splat(0.0); MAX_WIDE_ROWS];
+        if substep_id > 0 {
             let count = ((self.locked_axes | self.limit_axes).count_ones() as usize
                 + ang_motor_params.is_some() as usize)
                 .min(MAX_WIDE_ROWS);
-            for (prev, row) in prev_impulses[..count].iter_mut().zip(out_rows.iter()) {
+            for ((prev, sum), row) in prev_impulses[..count]
+                .iter_mut()
+                .zip(previous_substeps.iter_mut())
+                .zip(out_rows.iter())
+            {
                 *prev = row.impulse;
+                *sum = row.previous_substeps_impulse + row.impulse;
             }
         }
 
@@ -480,6 +495,9 @@ impl JointConstraintBuilderSimd {
             ang_motor_params.as_ref(),
             out_rows,
         );
+        for (row, sum) in out_rows[..len].iter_mut().zip(previous_substeps.iter()) {
+            row.previous_substeps_impulse = *sum;
+        }
 
         if let Some(coeff) = warmstart {
             let coeff = SimdReal::splat(coeff);

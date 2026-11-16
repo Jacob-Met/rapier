@@ -166,6 +166,7 @@ impl JointGenericExternalConstraintBuilder {
     pub fn update(
         &self,
         params: &IntegrationParameters,
+        substep_id: usize,
         multibodies: &MultibodyJointSet,
         bodies: &SolverBodies,
         jacobians: &mut DVector,
@@ -236,6 +237,19 @@ impl JointGenericExternalConstraintBuilder {
 
         let mut j_id = self.j_id;
 
+        // Multibody-linked impulse joints rebuild these rows every substep.
+        const MAX_ROWS: usize = 4 * SPATIAL_DIM;
+        let mut previous_substeps = [0.0; MAX_ROWS];
+        let count = crate::dynamics::solver::joint_data_num_constraints(&self.joint).min(MAX_ROWS);
+        if substep_id > 0 {
+            for (sum, row) in previous_substeps[..count]
+                .iter_mut()
+                .zip(out[self.constraint_id..].iter())
+            {
+                *sum = row.previous_substeps_impulse + row.impulse;
+            }
+        }
+
         GenericJointConstraint::lock_axes(
             params,
             self.joint_id,
@@ -250,6 +264,12 @@ impl JointGenericExternalConstraintBuilder {
             &mut j_id,
             &mut out[self.constraint_id..],
         );
+        for (row, sum) in out[self.constraint_id..self.constraint_id + count]
+            .iter_mut()
+            .zip(previous_substeps.iter())
+        {
+            row.previous_substeps_impulse = *sum;
+        }
     }
 }
 
@@ -423,6 +443,7 @@ impl JointConstraintHelper<Real> {
                 j_id2: block_j_id,
                 joint_id,
                 impulse: 0.0,
+                previous_substeps_impulse: 0.0,
                 impulse_bounds: [-Real::MAX, Real::MAX],
                 inv_lhs: 0.0,
                 rhs: 0.0,
@@ -472,6 +493,7 @@ impl JointConstraintHelper<Real> {
             j_id2,
             joint_id,
             impulse: 0.0,
+            previous_substeps_impulse: 0.0,
             impulse_bounds: [-Real::MAX, Real::MAX],
             inv_lhs: 0.0,
             rhs: rhs_wo_bias,

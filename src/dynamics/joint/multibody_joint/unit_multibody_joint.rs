@@ -59,6 +59,7 @@ pub fn unit_joint_limit_constraint(
         j_id2: *j_id,
         joint_id: usize::MAX, // TODO: we don’t support impulse writeback for internal constraints yet.
         impulse: 0.0,
+        previous_substeps_impulse: 0.0,
         impulse_bounds,
         inv_lhs: crate::utils::inv(lhs + cfm_gain),
         rhs: rhs_wo_bias + rhs_bias,
@@ -118,6 +119,7 @@ pub fn unit_joint_friction_constraint(
         j_id2: *j_id,
         joint_id: usize::MAX, // TODO: we don’t support impulse writeback for internal constraints yet.
         impulse: 0.0,
+        previous_substeps_impulse: 0.0,
         impulse_bounds: [-max_impulse, max_impulse],
         inv_lhs: crate::utils::inv(lhs + cfm_gain),
         rhs: 0.0,
@@ -191,6 +193,7 @@ pub fn unit_joint_motor_constraint(
         j_id2: *j_id,
         joint_id: usize::MAX, // TODO: we don’t support impulse writeback for internal constraints yet.
         impulse: 0.0,
+        previous_substeps_impulse: 0.0,
         impulse_bounds,
         cfm_coeff: motor_params.cfm_coeff,
         cfm_gain,

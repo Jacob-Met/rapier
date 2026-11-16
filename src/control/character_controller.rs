@@ -554,11 +554,19 @@ impl KinematicCharacterController {
                                 let target_vel = kinematic_parent.velocity_at_point(contact_point);
 
                                 let normal_target_mvt = target_vel.dot(normal) * dt;
-                                let normal_current_mvt = translation_remaining.dot(normal);
 
                                 manifold_center += contact_point;
-                                *translation_remaining +=
-                                    normal * (normal_target_mvt - normal_current_mvt);
+                                // Keep the escape nudge for a stationary, walkable
+                                // kinematic surface, or subsequent casts hit at TOI 0 and
+                                // consume all iterations. On walls and non-walkable contacts
+                                // retain the usual platform-normal velocity correction.
+                                if normal_target_mvt.abs() > self.normal_nudge_factor
+                                    || normal.dot(self.up) < self.max_slope_climb_angle.cos()
+                                {
+                                    let normal_current_mvt = translation_remaining.dot(normal);
+                                    *translation_remaining +=
+                                        normal * (normal_target_mvt - normal_current_mvt);
+                                }
                             }
                         }
 

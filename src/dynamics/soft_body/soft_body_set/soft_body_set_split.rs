@@ -5,14 +5,15 @@ use super::soft_body_set_proxies::{clone_mesh_collider, spawn_proxy};
 use super::{SoftBodyIslandEvent, SoftBodySet};
 use crate::alloc_prelude::*;
 use crate::dynamics::soft_body::{
-    SoftBody, SoftBodyCluster, SoftBodyHandle, SoftBodyPiece, SoftBodyTearEvent, SoftClusterSplit,
-    SoftCollisionMesh, SoftJointMove, SoftMeshId, SoftMeshMapping, SoftMeshRef,
+    SoftBody, SoftBodyCluster, SoftBodyEdge, SoftBodyHandle, SoftBodyPiece, SoftBodyTearEvent,
+    SoftClusterSplit, SoftCollisionMesh, SoftJointMove, SoftMeshId, SoftMeshMapping, SoftMeshRef,
+    SoftParticleAttachment,
 };
 use crate::dynamics::{
     ImpulseJointHandle, ImpulseJointSet, IslandManager, RigidBodyHandle, RigidBodySet,
 };
 use crate::geometry::{ColliderHandle, ColliderSet};
-use crate::math::{Pose, Real, Vector};
+use crate::math::{DIM, Pose, Real, Vector};
 
 /// The poses the proxies had before a split, by proxy (a fresh proxy records the pose of the
 /// proxy it was split from): what the joints and rigid colliders hung on them are re-based from
@@ -397,6 +398,63 @@ impl SoftBodySet {
             );
         }
 
+        // Partition geometry in one pass. Cloning the whole torn body for every fragment
+        // scales with (fragment count x original mesh size), even for tiny fragments.
+        // Keep the original cell indices until remove_dead_particles remaps skinned meshes.
+        let (template, mut geometry_by_piece) = {
+            let sb = &self.bodies[handle.0];
+            let mut template = sb.clone();
+            template.edges.clear();
+            template.cells.clear();
+            #[cfg(feature = "dim3")]
+            template.dihedrals.clear();
+            template.boundary.clear();
+            template.clusters.clear();
+            template.cluster_refs.clear();
+            template.attachments.clear();
+            template.boundary_element_cells.clear();
+            template.pieces.clear();
+            template.cell_index = None;
+
+            let mut geometry: Vec<PieceGeometry> = (0..pieces.len())
+                .map(|_| PieceGeometry::default())
+                .collect();
+            let belonging_piece = |vertices: &[u32]| {
+                let k = piece_of_particle[vertices[0] as usize] as usize;
+                vertices
+                    .iter()
+                    .all(|&v| piece_of_particle[v as usize] == k as u32)
+                    .then_some(k)
+            };
+            for edge in &sb.edges {
+                if let Some(k) = belonging_piece(&edge.vertices) {
+                    geometry[k].edges.push(*edge);
+                }
+            }
+            for (cell_id, cell) in sb.cells.iter().enumerate() {
+                if let Some(k) = belonging_piece(&cell.vertices) {
+                    geometry[k].cells.push(*cell);
+                    geometry[k].cell_source_ids.push(cell_id as u32);
+                }
+            }
+            #[cfg(feature = "dim3")]
+            for dihedral in &sb.dihedrals {
+                if let Some(k) = belonging_piece(&dihedral.vertices) {
+                    geometry[k].dihedrals.push(*dihedral);
+                }
+            }
+            for surface in &sb.boundary {
+                if let Some(k) = belonging_piece(surface) {
+                    geometry[k].boundary.push(*surface);
+                }
+            }
+            for attachment in &sb.attachments {
+                let k = piece_of_particle[attachment.particle as usize] as usize;
+                geometry[k].attachments.push(*attachment);
+            }
+            (template, geometry)
+        };
+
         // Every other piece becomes a soft body: a copy of the torn body reduced to the piece's
         // clusters and particles, its proxies and colliders re-tagged.
         let mut new_handles = Vec::new();
@@ -404,7 +462,14 @@ impl SoftBodySet {
         for k in 1..pieces.len() as u32 {
             let (piece_body, moves, remap) = {
                 let sb = &self.bodies[handle.0];
-                extract_piece(sb, handle, &piece_of_particle, k)
+                extract_piece(
+                    sb,
+                    &template,
+                    handle,
+                    &piece_of_particle,
+                    k,
+                    core::mem::take(&mut geometry_by_piece[k as usize]),
+                )
             };
             let num_particles = remap.len();
             let new_handle = SoftBodyHandle(self.bodies.insert(piece_body));
@@ -473,16 +538,39 @@ impl SoftBodySet {
     }
 }
 
+/// Elements already partitioned by their source particle component. Cross-piece edges,
+/// surfaces and dihedrals are discarded exactly as remove_dead_particles would discard them.
+#[derive(Default)]
+struct PieceGeometry {
+    edges: Vec<SoftBodyEdge>,
+    cells: Vec<crate::dynamics::soft_body::SoftBodyCell>,
+    cell_source_ids: Vec<u32>,
+    #[cfg(feature = "dim3")]
+    dihedrals: Vec<crate::dynamics::soft_body::SoftBodyDihedral>,
+    boundary: Vec<[u32; DIM]>,
+    attachments: Vec<SoftParticleAttachment>,
+}
+
 /// A copy of `sb` reduced to piece `k` of `piece_of_particle`: clusters renumbered (the caller
 /// re-tags their proxies and colliders), particles compacted, per-body state reset with `origin`.
 /// Returns the body, its clusters `(in sb, in copy)` and the particle remap (`u32::MAX`: dropped).
 fn extract_piece(
     sb: &SoftBody,
+    template: &SoftBody,
     origin: SoftBodyHandle,
     piece_of_particle: &[u32],
     k: u32,
+    geometry: PieceGeometry,
 ) -> (SoftBody, Vec<(u32, u32)>, Vec<u32>) {
-    let mut body = sb.clone();
+    let mut body = template.clone();
+    body.edges = geometry.edges;
+    body.cells = geometry.cells;
+    #[cfg(feature = "dim3")]
+    {
+        body.dihedrals = geometry.dihedrals;
+    }
+    body.boundary = geometry.boundary;
+    body.attachments = geometry.attachments;
     body.clusters = Vec::new();
     let mut moves = Vec::new();
     for (ci, cluster) in sb.clusters.iter().enumerate() {
@@ -507,7 +595,10 @@ fn extract_piece(
         moves.push((ci as u32, new_ci));
     }
     let dead: Vec<bool> = piece_of_particle.iter().map(|&p| p != k).collect();
-    let (_, remap) = body.remove_dead_particles(&dead);
+    let (_, remap) = body.remove_dead_particles_with_cell_ids(
+        &dead,
+        Some((sb.cells.len(), &geometry.cell_source_ids)),
+    );
     let root = body
         .live_clusters()
         .next()

@@ -653,6 +653,19 @@ pub(super) fn process_pair(
                 manifold.data.user_data = modifiable_user_data;
             }
 
+            // Only contacts kept for the solver can carry an impulse from this step.
+            // A reduced manifold or contact-modification hook may drop a previously
+            // solved point while it remains tracked for the next narrow-phase update.
+            // Clear its reported impulses and warm-start state before the solve.
+            for (id, point) in manifold.points.iter_mut().enumerate() {
+                if !manifold.data.solver_contacts.iter().any(|sc| {
+                    ((sc.contact_id[0] & !crate::geometry::contact_pair::NEW_CONTACT_BIT) as usize)
+                        == id
+                }) {
+                    point.data = Default::default();
+                }
+            }
+
             // Localize solver contacts: bake skins (and hook-written `dist`) into the anchors, then
             // express each in its body's CoM frame (world-attached/dominance-superior sides keep world
             // anchors, matching the solver's identity pose). Riding rigidly lets recycled steps skip updates.

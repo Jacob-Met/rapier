@@ -2,7 +2,7 @@ use crate::alloc_prelude::*;
 use crate::geometry::{ColliderHandle, ContactManifold, Shape, ShapeCastHit};
 use crate::math::{Pose, Real, Vector};
 use crate::pipeline::{QueryFilterFlags, QueryPipeline, QueryPipelineMut};
-use crate::utils;
+use crate::utils::{self, CrossProduct, DotProduct};
 use na::{RealField, Vector2};
 use parry::bounding_volume::BoundingVolume;
 use parry::query::details::ShapeCastOptions;
@@ -962,15 +962,27 @@ impl KinematicCharacterController {
 
             for pt in &manifold.points {
                 if pt.dist <= prediction {
-                    let body_mass = body.mass();
                     let contact_point = collider_pos * pt.local_p2;
-                    let delta_vel_per_contact = (velocity_to_transfer
-                        - body.velocity_at_point(contact_point))
-                    .dot(manifold.data.normal);
-                    let mass_ratio = body_mass * character_mass / (body_mass + character_mass);
+                    let normal = manifold.data.normal;
+                    let delta_vel_per_contact =
+                        (velocity_to_transfer - body.velocity_at_point(contact_point)).dot(normal);
+
+                    // An off-center impulse also changes the body's angular velocity.
+                    // Use the inverse effective mass at this contact point; otherwise
+                    // several contacts can amplify one another and launch light bodies.
+                    let torque_dir = (contact_point - body.center_of_mass()).gcross(normal);
+                    let mprops = body.mass_properties();
+                    let inverse_mass = normal.dot(mprops.effective_inv_mass * normal)
+                        + torque_dir.gdot(mprops.effective_world_inv_inertia * torque_dir)
+                        + utils::inv(character_mass);
+                    let mass_ratio = if character_mass > 0.0 {
+                        utils::inv(inverse_mass)
+                    } else {
+                        0.0
+                    };
 
                     body.apply_impulse_at_point(
-                        manifold.data.normal * delta_vel_per_contact.max(0.0) * mass_ratio,
+                        normal * delta_vel_per_contact.max(0.0) * mass_ratio,
                         contact_point,
                         true,
                     );

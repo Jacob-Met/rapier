@@ -157,6 +157,10 @@ export class RigidBodySet {
         impulseJoints: ImpulseJointSet,
         multibodyJoints: MultibodyJointSet,
     ) {
+        // Removing a soft-body cluster proxy can also delete its cluster colliders.
+        // Ordinary rigid bodies have all their attached colliders unmapped below.
+        const hasSoftBodies = softBodies.raw.len() > 0;
+
         // Unmap the entities that will be removed automatically because of the rigid-body removals.
         for (let i = 0; i < this.raw.rbNumColliders(handle); i += 1) {
             colliders.unmap(this.raw.rbCollider(handle, i));
@@ -180,8 +184,11 @@ export class RigidBodySet {
             multibodyJoints.raw,
         );
         this.map.delete(handle);
-        // A cluster proxy takes its cluster's colliders with it.
-        colliders.unmapRemovedColliders();
+        // A cluster proxy takes its cluster's colliders with it. Only scan the
+        // remaining colliders when soft bodies could have caused such a cascade.
+        if (hasSoftBodies) {
+            colliders.unmapRemovedColliders();
+        }
     }
 
     /**

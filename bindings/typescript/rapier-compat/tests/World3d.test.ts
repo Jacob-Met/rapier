@@ -1,4 +1,10 @@
-import {init, Vector3, World} from "../builds/3d-deterministic/pkg";
+import {
+    init,
+    Vector3,
+    World,
+    RigidBodyDesc,
+    ColliderDesc,
+} from "../builds/3d-deterministic/pkg";
 
 describe("3d/World", () => {
     let world: World;
@@ -39,5 +45,38 @@ describe("3d/World", () => {
         expect(map).toHaveBeenCalledTimes(1);
         rawSoftBodies.mockRestore();
         map.mockRestore();
+    });
+
+    test("removeRigidBody only unmaps its own colliders without soft bodies", () => {
+        const other = world.createRigidBody(RigidBodyDesc.fixed());
+        const otherCollider = world.createCollider(
+            ColliderDesc.cuboid(1, 1, 1),
+            other,
+        );
+        const removed = world.createRigidBody(RigidBodyDesc.dynamic());
+        const removedCollider = world.createCollider(
+            ColliderDesc.cuboid(1, 1, 1),
+            removed,
+        );
+        const scan = jest.spyOn(world.colliders, "unmapRemovedColliders");
+
+        world.removeRigidBody(removed);
+
+        expect(scan).not.toHaveBeenCalled();
+        expect(world.bodies.get(removed.handle)).toBeNull();
+        expect(world.colliders.get(removedCollider.handle)).toBeNull();
+        expect(world.bodies.get(other.handle)).toBe(other);
+        expect(world.colliders.get(otherCollider.handle)).toBe(otherCollider);
+    });
+
+    test("removeRigidBody keeps soft-body cascade reconciliation", () => {
+        const body = world.createRigidBody(RigidBodyDesc.dynamic());
+        const softBodies = jest
+            .spyOn(world.softBodies.raw, "len")
+            .mockReturnValue(1);
+        const scan = jest.spyOn(world.colliders, "unmapRemovedColliders");
+        world.removeRigidBody(body);
+        expect(scan).toHaveBeenCalledTimes(1);
+        softBodies.mockRestore();
     });
 });

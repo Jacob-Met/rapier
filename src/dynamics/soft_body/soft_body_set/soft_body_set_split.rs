@@ -4,10 +4,11 @@
 use super::soft_body_set_proxies::{clone_mesh_collider, spawn_proxy};
 use super::{SoftBodyIslandEvent, SoftBodySet};
 use crate::alloc_prelude::*;
+use crate::dynamics::soft_body::collision_mesh::SoftTopologyRemap;
 use crate::dynamics::soft_body::{
     SoftBody, SoftBodyCluster, SoftBodyEdge, SoftBodyHandle, SoftBodyPiece, SoftBodyTearEvent,
     SoftClusterSplit, SoftCollisionMesh, SoftJointMove, SoftMeshId, SoftMeshMapping, SoftMeshRef,
-    SoftParticleAttachment,
+    SoftParticleAttachment, SoftVolumePiece,
 };
 use crate::dynamics::{
     ImpulseJointHandle, ImpulseJointSet, IslandManager, RigidBodyHandle, RigidBodySet,
@@ -358,6 +359,12 @@ impl SoftBodySet {
             }
         }
 
+        // Each fragment's particles in original index order, matching the ordinary compaction.
+        let mut particles_by_piece = vec![Vec::new(); pieces.len()];
+        for (old, &piece) in piece_of_particle.iter().enumerate() {
+            particles_by_piece[piece as usize].push(old as u32);
+        }
+
         // A cluster straddling several pieces (one disconnected at creation, since a cluster the
         // tear reached was split already) is partitioned by piece, the heaviest part keeping it.
         let num_clusters = self.bodies[handle.0].clusters.len();
@@ -406,6 +413,7 @@ impl SoftBodySet {
             let mut template = sb.clone();
             template.edges.clear();
             template.cells.clear();
+            template.particles.clear();
             #[cfg(feature = "dim3")]
             template.dihedrals.clear();
             template.boundary.clear();
@@ -414,6 +422,7 @@ impl SoftBodySet {
             template.attachments.clear();
             template.boundary_element_cells.clear();
             template.pieces.clear();
+            template.volume_pieces.clear();
             template.cell_index = None;
 
             let mut geometry: Vec<PieceGeometry> = (0..pieces.len())
@@ -468,6 +477,7 @@ impl SoftBodySet {
                     handle,
                     &piece_of_particle,
                     k,
+                    &particles_by_piece[k as usize],
                     core::mem::take(&mut geometry_by_piece[k as usize]),
                 )
             };
@@ -560,9 +570,28 @@ fn extract_piece(
     origin: SoftBodyHandle,
     piece_of_particle: &[u32],
     k: u32,
+    particle_indices: &[u32],
     geometry: PieceGeometry,
 ) -> (SoftBody, Vec<(u32, u32)>, Vec<u32>) {
     let mut body = template.clone();
+    let mut remap = vec![u32::MAX; sb.particles.len()];
+    body.particles.reserve(particle_indices.len());
+    let mut family_roots = vec![u32::MAX; sb.particles.len()];
+    for (new, &old) in particle_indices.iter().enumerate() {
+        remap[old as usize] = new as u32;
+        let mut particle = sb.particles[old as usize];
+        let root = particle.split_root(old) as usize;
+        let family = &mut family_roots[root];
+        if *family == u32::MAX {
+            *family = new as u32;
+        }
+        particle.split_root = *family;
+        body.particles.push(particle);
+    }
+    let mut cell_remap = vec![u32::MAX; sb.cells.len()];
+    for (new, &old) in geometry.cell_source_ids.iter().enumerate() {
+        cell_remap[old as usize] = new as u32;
+    }
     body.edges = geometry.edges;
     body.cells = geometry.cells;
     #[cfg(feature = "dim3")]
@@ -571,6 +600,49 @@ fn extract_piece(
     }
     body.boundary = geometry.boundary;
     body.attachments = geometry.attachments;
+    let renumber = |vertices: &mut [u32]| {
+        for vertex in vertices {
+            *vertex = remap[*vertex as usize];
+            debug_assert_ne!(*vertex, u32::MAX);
+        }
+    };
+    for edge in &mut body.edges {
+        renumber(&mut edge.vertices);
+    }
+    for cell in &mut body.cells {
+        renumber(&mut cell.vertices);
+    }
+    #[cfg(feature = "dim3")]
+    for dihedral in &mut body.dihedrals {
+        renumber(&mut dihedral.vertices);
+    }
+    for surface in &mut body.boundary {
+        renumber(surface);
+    }
+    for attachment in &mut body.attachments {
+        attachment.particle = remap[attachment.particle as usize];
+    }
+    // The old warm-start impulses and inversion flags follow the volume pieces their
+    // particles belonged to; the actual boundary membership is rebuilt below.
+    body.volume_pieces = sb
+        .volume_pieces
+        .iter()
+        .filter_map(|previous| {
+            let particles: Vec<_> = previous
+                .particles
+                .iter()
+                .copied()
+                .filter(|&p| piece_of_particle[p as usize] == k)
+                .collect();
+            (!particles.is_empty()).then_some(SoftVolumePiece {
+                particles,
+                elements: Vec::new(),
+                rest_volume: previous.rest_volume,
+                impulse: previous.impulse,
+                inverted: previous.inverted,
+            })
+        })
+        .collect();
     body.clusters = Vec::new();
     let mut moves = Vec::new();
     for (ci, cluster) in sb.clusters.iter().enumerate() {
@@ -583,6 +655,19 @@ fn extract_piece(
         }
         let new_ci = body.clusters.len() as u32;
         let mut cluster = cluster.clone();
+        if cluster.shape_impulses.len() == cluster.particles.len() {
+            let mut keep = cluster
+                .particles
+                .iter()
+                .map(|&v| remap[v as usize] != u32::MAX);
+            cluster.shape_impulses.retain(|_| keep.next().unwrap());
+        } else {
+            cluster.shape_impulses.clear();
+        }
+        cluster.particles.retain(|&v| remap[v as usize] != u32::MAX);
+        for particle in &mut cluster.particles {
+            *particle = remap[*particle as usize];
+        }
         for (mi, mesh) in cluster.meshes.iter_mut().enumerate() {
             if let Some(mesh) = mesh {
                 mesh.set_id(SoftMeshId {
@@ -594,11 +679,22 @@ fn extract_piece(
         body.clusters.push(cluster);
         moves.push((ci as u32, new_ci));
     }
-    let dead: Vec<bool> = piece_of_particle.iter().map(|&p| p != k).collect();
-    let (_, remap) = body.remove_dead_particles_with_cell_ids(
-        &dead,
-        Some((sb.cells.len(), &geometry.cell_source_ids)),
-    );
+    body.rebuild_cluster_refs();
+    let topology_remap = SoftTopologyRemap {
+        cells: &cell_remap,
+        particles: &remap,
+        split: &[],
+        inserted: &[],
+    };
+    body.for_each_mesh_mut(|body, mesh| {
+        mesh.remap_topology(body, &topology_remap);
+        mesh.clear_contacts();
+    });
+    body.rebuild_boundary_tables();
+    body.rebuild_volume_pieces(&remap);
+    body.update_cluster_cells();
+    body.recolor();
+    body.topology_version = body.topology_version.wrapping_add(1);
     let root = body
         .live_clusters()
         .next()

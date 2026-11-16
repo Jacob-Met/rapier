@@ -2,6 +2,10 @@
 
 ### Fixed
 
+- Coupled angular joint motors now drive the shared swing angle (or full rotation when all
+  three angular axes are coupled) instead of silently doing nothing; singleton coupled
+  groups use the normal angular motor/limit row.
+
 - 3D friction no longer vanishes for a body locked to a plane (a locked translation with both
   rotations across it locked, e.g. 2D bodies simulated in a 3D world): the friction solve falls
   back to one tangent at a time when its 2×2 effective-mass matrix is singular, instead of dropping

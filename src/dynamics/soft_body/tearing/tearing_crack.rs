@@ -34,6 +34,22 @@ impl SoftBody {
         torn_cells: &[u32],
         event: &mut SoftBodyTearEvent,
     ) -> bool {
+        // Every split looks around one particle: index the cells by particle for the whole tear
+        // (a tear of many cells would otherwise scan the body many times per cell).
+        if !self.cells.is_empty() {
+            self.cell_index = Some(self.build_cell_index());
+        }
+        let changed = self.crack_body_indexed(torn_edges, torn_cells, event);
+        self.cell_index = None;
+        changed
+    }
+
+    fn crack_body_indexed(
+        &mut self,
+        torn_edges: &[u32],
+        torn_cells: &[u32],
+        event: &mut SoftBodyTearEvent,
+    ) -> bool {
         let edges: Vec<[u32; 2]> = torn_edges
             .iter()
             .filter_map(|&e| self.edges.get(e as usize))

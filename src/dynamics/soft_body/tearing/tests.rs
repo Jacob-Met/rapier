@@ -460,3 +460,46 @@ fn split_cloth_quad_across_its_diagonal() {
     assert!(close(sb.rest_measure(), measure));
     sb.validate_topology().unwrap();
 }
+
+/// Timing of a large tear on a fine grid (run with `--ignored --nocapture` in release).
+#[cfg(feature = "dim2")]
+#[test]
+#[ignore]
+fn big_tear_timing() {
+    for (label, columns) in [("1 column", 1usize), ("4 columns", 4), ("all cells", 0)] {
+        let builder = SoftBodyBuilder::grid(Vector::new(0.0, 1.5), Vector::new(1.5, 0.6), 45, 18)
+            .particle_mass(0.004)
+            .cell_model(SoftBodyCellModel::Corotational)
+            .surface_collider(ColliderBuilder::ball(0.05));
+        let (mut world, handle) = world_with(builder);
+        let sb = &world.soft_bodies[handle];
+        // The cells whose centroid lies in the chosen vertical bands.
+        let cells: Vec<u32> = sb
+            .cells()
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                if columns == 0 {
+                    return true;
+                }
+                let x = c
+                    .vertices
+                    .iter()
+                    .map(|&v| sb.particles()[v as usize].position.x)
+                    .sum::<Real>()
+                    / 3.0;
+                (0..columns)
+                    .any(|k| (x - (-1.0 + 2.0 * k as Real / columns.max(2) as Real)).abs() < 0.035)
+            })
+            .map(|(i, _)| i as u32)
+            .collect();
+        let start = std::time::Instant::now();
+        let event = world.tear_soft_body(handle, &[], &cells);
+        let ms = start.elapsed().as_secs_f64() * 1000.0;
+        std::println!(
+            "{label}: {} torn, {} bodies, {ms:.1} ms",
+            event.map_or(0, |e| e.torn_cells.len()),
+            family(&world, handle).len()
+        );
+    }
+}

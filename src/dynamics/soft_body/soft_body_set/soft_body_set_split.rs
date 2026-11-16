@@ -200,8 +200,13 @@ impl SoftBodySet {
                     })
                     .unwrap_or(0),
             };
-            for (k, _) in pieces.iter().enumerate() {
-                let restricted = mesh.restricted_to(sb, |v| vertex_piece(v) == k as u32);
+            let vertex_pieces: Vec<u32> =
+                (0..mesh.vertex_count() as u32).map(vertex_piece).collect();
+            for (k, restricted) in mesh
+                .partition_by_piece(sb, &vertex_pieces, pieces.len())
+                .into_iter()
+                .enumerate()
+            {
                 if k == 0 {
                     // The retained slot keeps its id and its collider (rebuilt by the caller).
                     let slot = &mut sb.clusters[cluster as usize].meshes;

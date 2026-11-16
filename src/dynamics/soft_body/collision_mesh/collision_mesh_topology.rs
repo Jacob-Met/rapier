@@ -406,67 +406,108 @@ impl SoftCollisionMesh {
         }
     }
 
-    /// A copy of this mesh over the vertices `keep` accepts: other vertices and their elements
-    /// dropped, tables rebuilt, contact state cleared, no collider or id. `None` when no element
-    /// remains; how a mesh follows a cluster split.
-    pub(crate) fn restricted_to(
+    /// Partitions one mesh across the pieces of a split cluster in one pass. The vertices of
+    /// each piece retain their source order; elements spanning multiple pieces are discarded.
+    /// Empty pieces have no mesh. Contact and derived topology state is rebuilt per piece.
+    pub(crate) fn partition_by_piece(
         &self,
         body: &SoftBody,
-        keep: impl Fn(u32) -> bool,
-    ) -> Option<Self> {
+        vertex_pieces: &[u32],
+        num_pieces: usize,
+    ) -> Vec<Option<Self>> {
         let n = self.vertex_count();
+        assert_eq!(vertex_pieces.len(), n);
+        let mut vertices_by_piece: Vec<Vec<usize>> = vec![Vec::new(); num_pieces];
         let mut vertex_remap = vec![u32::MAX; n];
-        let mut kept = 0u32;
-        for v in 0..n {
-            if keep(v as u32) {
-                vertex_remap[v] = kept;
-                kept += 1;
+        for (v, &k) in vertex_pieces.iter().enumerate() {
+            if let Some(vertices) = vertices_by_piece.get_mut(k as usize) {
+                vertex_remap[v] = vertices.len() as u32;
+                vertices.push(v);
             }
         }
-        let indices: Vec<[u32; DIM]> = self
-            .indices
-            .iter()
-            .filter(|element| {
-                element_vertices(element)
-                    .iter()
-                    .all(|v| vertex_remap[*v as usize] != u32::MAX)
-            })
-            .map(|element| {
-                let mut element = *element;
-                for v in element_vertices_mut(&mut element) {
-                    *v = vertex_remap[*v as usize];
+        let mut indices_by_piece: Vec<Vec<[u32; DIM]>> = vec![Vec::new(); num_pieces];
+        for element in &self.indices {
+            let vertices = element_vertices(element);
+            let Some(&first) = vertices.first() else {
+                continue;
+            };
+            let k = vertex_pieces[first as usize];
+            let Some(indices) = indices_by_piece.get_mut(k as usize) else {
+                continue;
+            };
+            if !vertices.iter().all(|&v| vertex_pieces[v as usize] == k) {
+                continue;
+            }
+            let mut new_element = *element;
+            for v in element_vertices_mut(&mut new_element) {
+                *v = vertex_remap[*v as usize];
+            }
+            indices.push(new_element);
+        }
+
+        // Clone the source only once. Its heavy vertex, topology and contact vectors are
+        // replaced by each fragment's own data and derived tables, not copied per fragment.
+        let mut template = self.clone();
+        template.indices.clear();
+        template.vertices.clear();
+        match &mut template.binding {
+            SoftMeshMapping::Direct { particles } => particles.clear(),
+            SoftMeshMapping::Skinned { bindings } => bindings.clear(),
+        }
+        template.ring_offsets.clear();
+        template.ring.clear();
+        template.vertex_elements_offsets.clear();
+        template.vertex_elements.clear();
+        template.element_cells.clear();
+        #[cfg(feature = "dim3")]
+        {
+            template.edges.clear();
+            template.element_edges.clear();
+            template.edge_owners.clear();
+        }
+        template.clear_contacts();
+        template.overlap_states.clear();
+        template.overlap_warm.clear();
+        template.volume_contacts.clear();
+        template.vertex_cache.clear();
+        indices_by_piece
+            .into_iter()
+            .zip(vertices_by_piece)
+            .map(|(indices, vertices)| {
+                if indices.is_empty() {
+                    return None;
                 }
-                element
+                let mut mesh = template.clone();
+                mesh.indices = indices;
+                match (&self.binding, &mut mesh.binding) {
+                    (
+                        SoftMeshMapping::Direct { particles: from },
+                        SoftMeshMapping::Direct { particles: to },
+                    ) => {
+                        to.extend(vertices.iter().map(|&v| from[v]));
+                    }
+                    (
+                        SoftMeshMapping::Skinned { bindings: from },
+                        SoftMeshMapping::Skinned { bindings: to },
+                    ) => {
+                        to.extend(vertices.iter().map(|&v| from[v]));
+                        mesh.vertices
+                            .extend(vertices.iter().map(|&v| self.vertices[v]));
+                    }
+                    _ => unreachable!("mesh binding kind changed while partitioning"),
+                }
+                mesh.collider = ColliderHandle::invalid();
+                mesh.id = SoftMeshId::default();
+                mesh.rebuild_tables(body);
+                mesh.rest_signed_volume = if mesh.is_wire() {
+                    0.0
+                } else {
+                    SoftBody::boundary_volume(&mesh.indices, |i| mesh.rest_vertex(body, i as usize))
+                };
+                mesh.update_orientation(body);
+                Some(mesh)
             })
-            .collect();
-        if indices.is_empty() {
-            return None;
-        }
-        let mut mesh = self.clone();
-        mesh.indices = indices;
-        let mut keep = (0..n).map(|v| vertex_remap[v] != u32::MAX);
-        match &mut mesh.binding {
-            SoftMeshMapping::Direct { particles } => particles.retain(|_| keep.next().unwrap()),
-            SoftMeshMapping::Skinned { bindings } => {
-                let mut keep_vertices = keep.clone();
-                bindings.retain(|_| keep.next().unwrap());
-                mesh.vertices.retain(|_| keep_vertices.next().unwrap());
-            }
-        }
-        mesh.collider = ColliderHandle::invalid();
-        mesh.id = SoftMeshId::default();
-        mesh.clear_contacts();
-        mesh.overlap_states.clear();
-        mesh.overlap_warm.clear();
-        mesh.volume_contacts.clear();
-        mesh.rebuild_tables(body);
-        mesh.rest_signed_volume = if mesh.is_wire() {
-            0.0
-        } else {
-            SoftBody::boundary_volume(&mesh.indices, |i| mesh.rest_vertex(body, i as usize))
-        };
-        mesh.update_orientation(body);
-        Some(mesh)
+            .collect()
     }
 
     /// Clears the contact state kept across steps (a topology change invalidated its ids).

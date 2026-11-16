@@ -721,6 +721,70 @@ impl<N: ScalarType> JointConstraintHelper<N> {
 }
 
 impl JointConstraintHelper<Real> {
+    /// Jacobian and unsigned angle for a coupled angular group.
+    /// Two coupled axes regulate the swing of the remaining free axis;
+    /// three coupled axes regulate the whole relative orientation.
+    #[cfg(feature = "dim3")]
+    fn coupled_angular_swing(&self, coupled_axes: u8) -> (crate::math::Vector, Real) {
+        let ang_coupled_axes = coupled_axes >> DIM;
+        if ang_coupled_axes.count_ones() == 3 {
+            // A fully coupled ball joint regulates the total relative rotation.
+            // The quaternion's local axis must be expressed in world space.
+            let (axis_local, angle) = self.ang_err.to_axis_angle();
+            return (self.basis.mul_vec3(axis_local), angle);
+        }
+
+        assert_eq!(ang_coupled_axes.count_ones(), 2);
+        let free_axis = ang_coupled_axes.trailing_ones() as usize;
+        let axis1 = self.basis.column(free_axis);
+        let axis2 = self.basis2.column(free_axis);
+
+        let rot = Rot3::from_rotation_arc(axis1, axis2);
+        let (mut ang_jac, angle) = rot.to_axis_angle();
+        if angle == 0.0 {
+            ang_jac = axis1.orthonormal_basis()[0];
+        }
+        (ang_jac, angle)
+    }
+
+    #[cfg(feature = "dim3")]
+    pub fn motor_angular_coupled(
+        &self,
+        joint_id: [JointIndex; 1],
+        body1: &JointSolverBody<Real, 1>,
+        body2: &JointSolverBody<Real, 1>,
+        coupled_axes: u8,
+        motor_params: &MotorParameters<Real>,
+        writeback_id: WritebackId,
+    ) -> JointConstraint<Real, 1> {
+        let (ang_jac, angle) = self.coupled_angular_swing(coupled_axes);
+        let rhs_wo_bias =
+            (angle - motor_params.target_pos) * motor_params.erp_inv_dt - motor_params.target_vel;
+        let ii_ang_jac1 = body1.ii.transform_vector(ang_jac);
+        let ii_ang_jac2 = body2.ii.transform_vector(ang_jac);
+
+        JointConstraint {
+            joint_id,
+            solver_vel1: body1.solver_vel,
+            solver_vel2: body2.solver_vel,
+            im1: body1.im,
+            im2: body2.im,
+            impulse: 0.0,
+            impulse_bounds: [-motor_params.max_impulse, motor_params.max_impulse],
+            lin_jac: Default::default(),
+            ang_jac1: ang_jac,
+            ang_jac2: ang_jac,
+            ii_ang_jac1,
+            ii_ang_jac2,
+            inv_lhs: 0.0,
+            cfm_coeff: motor_params.cfm_coeff,
+            cfm_gain: motor_params.cfm_gain,
+            rhs: rhs_wo_bias,
+            rhs_wo_bias,
+            writeback_id,
+        }
+    }
+
     #[cfg(feature = "dim3")]
     pub fn limit_angular_coupled(
         &self,
@@ -734,19 +798,7 @@ impl JointConstraintHelper<Real> {
         erp_inv_dt: Real,
         cfm_coeff: Real,
     ) -> JointConstraint<Real, 1> {
-        // NOTE: right now, this only supports exactly 2 coupled axes.
-        let ang_coupled_axes = coupled_axes >> DIM;
-        assert_eq!(ang_coupled_axes.count_ones(), 2);
-        let not_coupled_index = ang_coupled_axes.trailing_ones() as usize;
-        let axis1 = self.basis.column(not_coupled_index);
-        let axis2 = self.basis2.column(not_coupled_index);
-
-        let rot = Rot3::from_rotation_arc(axis1, axis2);
-        let (mut ang_jac, angle) = rot.to_axis_angle();
-
-        if angle == 0.0 {
-            ang_jac = axis1.orthonormal_basis()[0];
-        }
+        let (ang_jac, angle) = self.coupled_angular_swing(coupled_axes);
 
         let min_enabled = angle <= limits[0];
         let max_enabled = limits[1] <= angle;

@@ -1,3 +1,10 @@
+## Unreleased
+
+### Fixed
+
+- Coupled angular motors now drive the shared swing angle (or full rotation when all three
+  angular axes are coupled); singleton groups use the regular motor and limit rows.
+
 ## v0.36.1 (4 October 2026)
 
 ### Added

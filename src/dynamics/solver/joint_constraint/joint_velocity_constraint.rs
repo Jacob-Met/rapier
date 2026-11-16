@@ -222,8 +222,31 @@ impl JointConstraint<Real, 1> {
             }
         }
 
+        #[cfg(feature = "dim3")]
         if (motor_axes & coupled_axes) & JointAxesMask::ANG_AXES.bits() != 0 {
-            // TODO: coupled angular motor constraint.
+            let motor = &joint.motors[first_coupled_ang_axis_id].motor_params(params.dt);
+            let writeback = WritebackId::Motor(first_coupled_ang_axis_id);
+            out[len] = if (coupled_axes & JointAxesMask::ANG_AXES.bits()).count_ones() == 1 {
+                // A singleton "coupled" group is just a regular angular motor.
+                builder.motor_angular(
+                    [joint_id],
+                    body1,
+                    body2,
+                    first_coupled_ang_axis_id - DIM,
+                    motor,
+                    writeback,
+                )
+            } else {
+                builder.motor_angular_coupled(
+                    [joint_id],
+                    body1,
+                    body2,
+                    coupled_axes,
+                    motor,
+                    writeback,
+                )
+            };
+            len += 1;
         }
 
         if (motor_axes & coupled_axes) & JointAxesMask::LIN_AXES.bits() != 0 {
@@ -318,20 +341,35 @@ impl JointConstraint<Real, 1> {
 
         #[cfg(feature = "dim3")]
         if has_ang_coupling && (limit_axes & (1 << first_coupled_ang_axis_id)) != 0 {
-            out[len] = builder.limit_angular_coupled(
-                params,
-                [joint_id],
-                body1,
-                body2,
-                coupled_axes,
-                [
-                    joint.limits[first_coupled_ang_axis_id].min,
-                    joint.limits[first_coupled_ang_axis_id].max,
-                ],
-                WritebackId::Limit(first_coupled_ang_axis_id),
-                erp_inv_dt,
-                cfm_coeff,
-            );
+            let writeback = WritebackId::Limit(first_coupled_ang_axis_id);
+            out[len] = if (coupled_axes & JointAxesMask::ANG_AXES.bits()).count_ones() == 1 {
+                builder.limit_angular(
+                    params,
+                    [joint_id],
+                    body1,
+                    body2,
+                    first_coupled_ang_axis_id - DIM,
+                    ang_limits[first_coupled_ang_axis_id - DIM],
+                    writeback,
+                    erp_inv_dt,
+                    cfm_coeff,
+                )
+            } else {
+                builder.limit_angular_coupled(
+                    params,
+                    [joint_id],
+                    body1,
+                    body2,
+                    coupled_axes,
+                    [
+                        joint.limits[first_coupled_ang_axis_id].min,
+                        joint.limits[first_coupled_ang_axis_id].max,
+                    ],
+                    writeback,
+                    erp_inv_dt,
+                    cfm_coeff,
+                )
+            };
             len += 1;
         }
 

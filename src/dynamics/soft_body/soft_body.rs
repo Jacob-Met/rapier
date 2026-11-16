@@ -146,6 +146,10 @@ pub struct SoftBody {
     /// The soft bodies split off from this one, in creation order (see [`Self::pieces`]).
     #[cfg_attr(feature = "serde-serialize", serde(default))]
     pub(crate) pieces: Vec<crate::dynamics::SoftBodyHandle>,
+    /// The cells around each particle, sorted, while a tear runs (see `SoftBody::crack_body`):
+    /// the per-split searches look around a particle instead of scanning the whole body.
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    pub(crate) cell_index: Option<Vec<Vec<u32>>>,
     /// User-defined data associated to this soft body.
     pub user_data: u128,
 }

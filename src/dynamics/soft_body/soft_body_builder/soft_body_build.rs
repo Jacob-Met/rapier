@@ -242,6 +242,7 @@ impl SoftBodyBuilder {
             sleep_speed: 0.0,
             tearing_pending: false,
             topology_version: 0,
+            cell_index: None,
             contact_approach_speeds: [None; 2],
             contact_approach_step_open: false,
             contact_load: 0.0,

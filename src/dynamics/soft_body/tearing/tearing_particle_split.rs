@@ -119,6 +119,37 @@ fn replace(vertices: &mut [u32], from: u32, to: u32) {
 }
 
 impl SoftBody {
+    /// The cells around each particle, each list sorted (see `cell_index`).
+    pub(super) fn build_cell_index(&self) -> Vec<Vec<u32>> {
+        let mut index = vec![Vec::new(); self.particles.len()];
+        for (i, c) in self.cells.iter().enumerate() {
+            for &v in &c.vertices {
+                index[v as usize].push(i as u32);
+            }
+        }
+        index
+    }
+
+    /// The cells around `v` when the cell index is up (during a tear) and `kind` is cells.
+    fn indexed_cells(&self, kind: MeasureKind, v: u32) -> Option<&[u32]> {
+        match (kind, &self.cell_index) {
+            (MeasureKind::Cells, Some(index)) => Some(index[v as usize].as_slice()),
+            _ => None,
+        }
+    }
+
+    /// Moves cell `c` from `from`'s list to `to`'s in the cell index, if it is up.
+    fn reindex_cell(&mut self, c: u32, from: u32, to: u32) {
+        if let Some(index) = &mut self.cell_index {
+            if let Ok(pos) = index[from as usize].binary_search(&c) {
+                index[from as usize].remove(pos);
+            }
+            if let Err(pos) = index[to as usize].binary_search(&c) {
+                index[to as usize].insert(pos, c);
+            }
+        }
+    }
+
     /// The kind of this body's measure elements, by priority: its cells, its surface triangles
     /// (3D, without cells), its structural edges. `None` when it has none of them.
     pub(super) fn measure_kind(&self) -> Option<MeasureKind> {
@@ -264,6 +295,14 @@ impl SoftBody {
         let Some(kind) = self.measure_kind() else {
             return false;
         };
+        if let Some(&first) = particles.first() {
+            if let Some(cells) = self.indexed_cells(kind, first) {
+                return cells.iter().any(|&c| {
+                    let vertices = &self.cells[c as usize].vertices;
+                    particles.iter().all(|p| vertices.contains(p))
+                });
+            }
+        }
         let mut found = false;
         self.for_each_measure_element(kind, |_, vertices| {
             found |= particles.iter().all(|p| vertices.contains(p));
@@ -275,12 +314,19 @@ impl SoftBody {
     pub(super) fn fan(&self, kind: MeasureKind, v: u32) -> Fan {
         let mut elements = Vec::new();
         let mut vertices = Vec::new();
-        self.for_each_measure_element(kind, |i, element| {
-            if element.contains(&v) {
-                elements.push(i);
-                vertices.push(element.to_vec());
+        if let Some(cells) = self.indexed_cells(kind, v) {
+            for &c in cells {
+                elements.push(c);
+                vertices.push(self.cells[c as usize].vertices.to_vec());
             }
-        });
+        } else {
+            self.for_each_measure_element(kind, |i, element| {
+                if element.contains(&v) {
+                    elements.push(i);
+                    vertices.push(element.to_vec());
+                }
+            });
+        }
         let n = elements.len();
         Fan {
             kind,
@@ -387,6 +433,9 @@ impl SoftBody {
                 }
             }
         }
+        if self.indexed_cells(kind, pivot).is_some() {
+            return self.reachable_cells_indexed(seeds, pivot, limit);
+        }
         // Facet -> elements map of the whole body (a tear is a rare event).
         let mut by_facet: HashMap<[u32; 3], Vec<u32>> = HashMap::default();
         let mut elements: HashMap<u32, Vec<u32>> = HashMap::default();
@@ -415,6 +464,45 @@ impl SoftBody {
                     }
                 }
             });
+        }
+        seen.len()
+    }
+
+    /// [`Self::reachable_elements`] for cells, walking the cell index: the neighbors through a
+    /// facet are the cells around its first vertex holding all of its vertices.
+    fn reachable_cells_indexed(&self, seeds: &[u32], pivot: u32, limit: usize) -> usize {
+        let Some(index) = &self.cell_index else {
+            return 0;
+        };
+        let mut seen: Vec<u32> = seeds.to_vec();
+        seen.sort_unstable();
+        seen.dedup();
+        let mut stack: Vec<u32> = seen.clone();
+        while let Some(e) = stack.pop() {
+            if seen.len() >= limit {
+                return seen.len();
+            }
+            let vertices = self.cells[e as usize].vertices;
+            for skip in 0..vertices.len() {
+                let facet: Vec<u32> = (0..vertices.len())
+                    .filter(|&i| i != skip)
+                    .map(|i| vertices[i])
+                    .collect();
+                if facet.contains(&pivot) {
+                    continue;
+                }
+                for &n in &index[facet[0] as usize] {
+                    if facet
+                        .iter()
+                        .all(|w| self.cells[n as usize].vertices.contains(w))
+                    {
+                        if let Err(pos) = seen.binary_search(&n) {
+                            seen.insert(pos, n);
+                            stack.push(n);
+                        }
+                    }
+                }
+            }
         }
         seen.len()
     }
@@ -465,6 +553,11 @@ impl SoftBody {
 
     /// Whether some measure element of the given kind contains both `x` and `y`.
     fn share_measure_element(&self, kind: MeasureKind, x: u32, y: u32) -> bool {
+        if let Some(cells) = self.indexed_cells(kind, x) {
+            return cells
+                .iter()
+                .any(|&c| self.cells[c as usize].vertices.contains(&y));
+        }
         let mut found = false;
         self.for_each_measure_element(kind, |_, vertices| {
             found |= vertices.contains(&x) && vertices.contains(&y);
@@ -508,6 +601,9 @@ impl SoftBody {
                     ..source
                 });
                 let copy = self.particles.len() as u32 - 1;
+                if let Some(index) = &mut self.cell_index {
+                    index.push(Vec::new());
+                }
                 log.split_particles.push((copy, v));
                 copies.push(copy);
             }
@@ -541,6 +637,9 @@ impl SoftBody {
             let g = fan.groups[i];
             if g == 0 {
                 continue;
+            }
+            if kind == MeasureKind::Cells {
+                self.reindex_cell(e, v, copies[g]);
             }
             let target: &mut [u32] = match kind {
                 MeasureKind::Cells => &mut self.cells[e as usize].vertices,

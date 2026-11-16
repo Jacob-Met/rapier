@@ -59,6 +59,51 @@ fn tears_never_split_off_a_chip() {
     }
 }
 
+/// A dense tear creates many tiny bodies: all of them must retain their own geometry,
+/// material and collision meshes after the original mesh has been partitioned.
+#[cfg(feature = "dim2")]
+#[test]
+fn many_fragments_keep_their_material_and_colliders() {
+    let builder = SoftBodyBuilder::grid(Vector::ZERO, Vector::splat(1.0), 18, 8)
+        .particle_mass(0.05)
+        .surface_collider(ColliderBuilder::ball(0.02));
+    let (mut world, handle) = world_with(builder);
+    let original = &world.soft_bodies[handle];
+    let mass = original.mass();
+    let measure = original.rest_measure();
+    let cells: Vec<u32> = (0..original.cells().len() as u32).collect();
+    let event = world.tear_soft_body(handle, &[], &cells).unwrap();
+    assert!(!event.torn_cells.is_empty(), "no cells were torn");
+    let fragments = family(&world, handle);
+    assert!(
+        fragments.len() > 10,
+        "tear did not split into many fragments"
+    );
+
+    let (mut mass_after, mut measure_after, mut cell_count) = (0.0, 0.0, 0);
+    for &fragment in &fragments {
+        let body = &world.soft_bodies[fragment];
+        body.validate_topology().unwrap();
+        assert_eq!(body.connected_pieces().len(), 1);
+        assert!(
+            body.collision_mesh().is_some(),
+            "fragment lost its collision mesh"
+        );
+        for mesh in body.meshes() {
+            assert!(
+                mesh.vertex_positions(body)
+                    .all(|position| position.is_finite())
+            );
+        }
+        mass_after += body.mass();
+        measure_after += body.rest_measure();
+        cell_count += body.cells().len();
+    }
+    assert_eq!(cell_count, cells.len(), "a cell was lost or duplicated");
+    assert!((mass_after - mass).abs() <= mass * 1.0e-5);
+    assert!((measure_after - measure).abs() <= measure * 1.0e-5);
+}
+
 /// Checks the seeded components of a torn rope, of a cluster of it, and of a body made of
 /// disconnected ropes: measure and mass add up, a never-connected cluster reports separate
 /// components, and a seed pair reaches only the ropes it touches.

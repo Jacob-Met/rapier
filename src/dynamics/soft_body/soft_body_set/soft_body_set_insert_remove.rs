@@ -68,6 +68,7 @@ impl SoftBodySet {
             load_extra_substeps: 0,
             origin: None,
             pieces: Vec::new(),
+            edge_index: None,
             user_data: 0,
         }));
 

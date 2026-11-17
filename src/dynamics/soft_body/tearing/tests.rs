@@ -729,3 +729,128 @@ fn split_cloth_quad_across_its_diagonal() {
     assert!(close(sb.rest_measure(), measure));
     sb.validate_topology().unwrap();
 }
+
+/// During a split, deleting a straddling bend edge compacts edge indices. An active incidence
+/// index must follow that compaction and give exactly the same topology as the scan path.
+#[test]
+fn indexed_edge_compaction_matches_unindexed_split() {
+    let positions: Vec<Vector> = [0.0, 1.0, 2.0, 4.0, 5.0]
+        .iter()
+        .map(|&x| Vector::X * x)
+        .collect();
+    let segments = vec![[0, 1], [1, 2], [2, 3], [3, 4]];
+    let builder = SoftBodyBuilder::new(positions)
+        .edges(segments.clone())
+        .bend_edges(vec![[0, 2], [1, 3], [2, 4]])
+        .particle_mass(0.9);
+    #[cfg(feature = "dim2")]
+    let builder = builder.surface(segments);
+    #[cfg(feature = "dim3")]
+    let builder = builder.wire(segments);
+    let (world, handle) = world_with(builder);
+    let mut baseline = world.soft_bodies[handle].clone();
+    let mut indexed = baseline.clone();
+    indexed.edge_index = Some(indexed.build_edge_index());
+    let origin = baseline.particles[2].rest_position;
+    let normal = baseline.particles[3].rest_position - origin;
+    let fan = baseline.plane_fan(2, origin, normal, None).unwrap();
+    let mut plain_log = SplitLog::default();
+    let mut index_log = SplitLog::default();
+    assert!(baseline.split_fan(2, &fan, &mut plain_log));
+    assert!(indexed.split_fan(2, &fan, &mut index_log));
+    assert_eq!(index_log.removed_edges, vec![[1, 3]]);
+    assert_eq!(index_log.removed_edges, plain_log.removed_edges);
+    assert_eq!(index_log.split_particles, plain_log.split_particles);
+    assert_eq!(
+        indexed.edge_index.as_ref().unwrap(),
+        &indexed.build_edge_index(),
+        "edge index was not updated after straddler compaction"
+    );
+    baseline.remove_straddlers_across_pieces(&mut plain_log);
+    indexed.remove_straddlers_across_pieces(&mut index_log);
+    let edge_vertices = |sb: &SoftBody| {
+        sb.edges
+            .iter()
+            .map(|edge| edge.vertices)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(edge_vertices(&indexed), edge_vertices(&baseline));
+    assert_eq!(indexed.boundary, baseline.boundary);
+    assert_eq!(indexed.rest_measure(), baseline.rest_measure());
+    assert_eq!(indexed.mass(), baseline.mass());
+}
+
+/// Release A/B: dense cracks and sparse negative controls; native states must agree bitwise.
+#[cfg(feature = "dim2")]
+#[test]
+#[ignore = "performance benchmark"]
+fn benchmark_edge_index_dense_and_sparse_tears() {
+    let mix = |hash: &mut u64, value: u64| {
+        *hash = (*hash ^ value).wrapping_mul(0x100000001b3);
+    };
+    for (nx, ny, request) in [
+        (34, 14, 0usize),
+        (50, 20, 0),
+        (80, 45, 1),
+        (80, 45, 2),
+        (80, 45, 4),
+        (80, 45, 8),
+    ] {
+        let mut times = Vec::new();
+        let mut counts = (0, 0, 0);
+        let mut fingerprint = 0xcbf29ce484222325u64;
+        for trial in 0..9 {
+            let builder = SoftBodyBuilder::grid(Vector::ZERO, Vector::splat(1.0), nx, ny)
+                .min_piece(1)
+                .particle_mass(0.05)
+                .surface_collider(ColliderBuilder::ball(0.02));
+            let (mut world, handle) = world_with(builder);
+            let count = world.soft_bodies[handle].cells().len();
+            let cells: Vec<u32> = match request {
+                0 => (0..count as u32).collect(),
+                1 => vec![(count / 2) as u32],
+                n => (0..n)
+                    .map(|k| ((k * count / n + count / (2 * n)) % count) as u32)
+                    .collect(),
+            };
+            let start = std::time::Instant::now();
+            let event = world.tear_soft_body(handle, &[], &cells);
+            times.push(start.elapsed().as_micros());
+            counts = event.map_or((0, 0, 0), |e| {
+                (e.torn_cells.len(), e.split_particles.len(), e.pieces.len())
+            });
+            if trial == 0 {
+                for (_, sb) in world.soft_bodies.iter() {
+                    sb.validate_topology().unwrap();
+                    mix(&mut fingerprint, sb.particles().len() as u64);
+                    mix(&mut fingerprint, sb.cells().len() as u64);
+                    for p in sb.particles() {
+                        mix(&mut fingerprint, p.position.x.to_bits() as u64);
+                        mix(&mut fingerprint, p.position.y.to_bits() as u64);
+                        mix(&mut fingerprint, p.mass.to_bits() as u64);
+                    }
+                    for c in sb.cells() {
+                        for &v in &c.vertices {
+                            mix(&mut fingerprint, v as u64);
+                        }
+                    }
+                    for e in sb.edges() {
+                        for &v in &e.vertices {
+                            mix(&mut fingerprint, v as u64);
+                        }
+                    }
+                }
+            }
+        }
+        times.sort_unstable();
+        std::println!(
+            "INDEX_BENCH nx={nx} ny={ny} request={request} torn={} copies={} fragments={} us_median={} us_min={} us_max={} fingerprint={fingerprint:016x}",
+            counts.0,
+            counts.1,
+            counts.2,
+            times[4],
+            times[0],
+            times[8]
+        );
+    }
+}

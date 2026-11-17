@@ -248,6 +248,7 @@ impl SoftBodyBuilder {
             load_extra_substeps: 0,
             origin: None,
             pieces: Vec::new(),
+            edge_index: None,
             user_data: self.user_data,
         };
         // From the builder's positions: the particles' rest positions are centered on `rest_com`.

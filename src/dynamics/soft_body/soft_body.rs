@@ -146,6 +146,9 @@ pub struct SoftBody {
     /// The soft bodies split off from this one, in creation order (see [`Self::pieces`]).
     #[cfg_attr(feature = "serde-serialize", serde(default))]
     pub(crate) pieces: Vec<crate::dynamics::SoftBodyHandle>,
+    /// Edge ids incident on each particle; transiently built for dense tears.
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    pub(crate) edge_index: Option<Vec<Vec<u32>>>,
     /// User-defined data associated to this soft body.
     pub user_data: u128,
 }

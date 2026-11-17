@@ -144,7 +144,7 @@ impl SoftBody {
             mesh.remap_topology(body, &remap_tables);
             mesh.clear_contacts();
         });
-        self.rebuild_boundary_tables();
+        self.rebuild_boundary_tables(&[]);
         self.recolor();
         self.modified = true;
         self.topology_version = self.topology_version.wrapping_add(1);

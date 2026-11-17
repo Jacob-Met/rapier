@@ -469,24 +469,70 @@ impl SoftBodySet {
             (template, geometry)
         };
 
+        // Partition source clusters and warm volume constraints once. Scanning all
+        // source clusters / volume particles for each fragment was quadratic in
+        // the number of fragments, even after geometry itself was partitioned.
+        let (clusters_by_piece, mut volume_by_piece) = {
+            let sb = &self.bodies[handle.0];
+            let mut clusters = vec![Vec::new(); pieces.len()];
+            for (ci, cluster) in sb.clusters.iter().enumerate() {
+                if cluster.is_live() {
+                    if let Some(&v) = cluster.particles.first() {
+                        clusters[piece_of_particle[v as usize] as usize].push(ci as u32);
+                    }
+                }
+            }
+            let mut volumes: Vec<Vec<SoftVolumePiece>> = vec![Vec::new(); pieces.len()];
+            let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); pieces.len()];
+            let mut touched = Vec::new();
+            for previous in &sb.volume_pieces {
+                for &v in &previous.particles {
+                    let k = piece_of_particle[v as usize] as usize;
+                    if buckets[k].is_empty() {
+                        touched.push(k);
+                    }
+                    buckets[k].push(v);
+                }
+                for &k in &touched {
+                    volumes[k].push(SoftVolumePiece {
+                        particles: core::mem::take(&mut buckets[k]),
+                        elements: Vec::new(),
+                        rest_volume: previous.rest_volume,
+                        impulse: previous.impulse,
+                        inverted: previous.inverted,
+                    });
+                }
+                touched.clear();
+            }
+            (clusters, volumes)
+        };
+
         // Every other piece becomes a soft body: a copy of the torn body reduced to the piece's
         // clusters and particles, its proxies and colliders re-tagged.
         let mut new_handles = Vec::new();
         let mut moved: Vec<(u32, SoftBodyHandle, u32)> = Vec::new();
+        // These index maps are workspace scratch, not per-fragment allocations. Only
+        // entries belonging to each extracted piece are touched and reset.
+        let source = &self.bodies[handle.0];
+        let mut particle_remap = vec![u32::MAX; source.particles.len()];
+        let mut family_roots = vec![u32::MAX; source.particles.len()];
+        let mut cell_remap = vec![u32::MAX; source.cells.len()];
         for k in 1..pieces.len() as u32 {
-            let (piece_body, moves, remap) = {
+            let (piece_body, moves) = {
                 let sb = &self.bodies[handle.0];
                 extract_piece(
                     sb,
                     &template,
                     handle,
-                    &piece_of_particle,
-                    k,
                     &particles_by_piece[k as usize],
+                    &clusters_by_piece[k as usize],
+                    core::mem::take(&mut volume_by_piece[k as usize]),
                     core::mem::take(&mut geometry_by_piece[k as usize]),
+                    &mut particle_remap,
+                    &mut family_roots,
+                    &mut cell_remap,
                 )
             };
-            let num_particles = remap.len();
             let new_handle = SoftBodyHandle(self.bodies.insert(piece_body));
             for &(old_ci, new_ci) in &moves {
                 let cluster = &self.bodies[new_handle.0].clusters[new_ci as usize];
@@ -512,7 +558,7 @@ impl SoftBodySet {
             }
             event.pieces.push(SoftBodyPiece {
                 soft_body: new_handle,
-                particles: kept_particles(&remap, num_particles),
+                particles: particles_by_piece[k as usize].clone(),
                 clusters: moves.iter().map(|&(old, new)| [old, new]).collect(),
             });
             self.island_events
@@ -573,15 +619,16 @@ fn extract_piece(
     sb: &SoftBody,
     template: &SoftBody,
     origin: SoftBodyHandle,
-    piece_of_particle: &[u32],
-    k: u32,
     particle_indices: &[u32],
+    cluster_indices: &[u32],
+    volume_pieces: Vec<SoftVolumePiece>,
     geometry: PieceGeometry,
-) -> (SoftBody, Vec<(u32, u32)>, Vec<u32>) {
+    remap: &mut [u32],
+    family_roots: &mut [u32],
+    cell_remap: &mut [u32],
+) -> (SoftBody, Vec<(u32, u32)>) {
     let mut body = template.clone();
-    let mut remap = vec![u32::MAX; sb.particles.len()];
     body.particles.reserve(particle_indices.len());
-    let mut family_roots = vec![u32::MAX; sb.particles.len()];
     for (new, &old) in particle_indices.iter().enumerate() {
         remap[old as usize] = new as u32;
         let mut particle = sb.particles[old as usize];
@@ -593,7 +640,6 @@ fn extract_piece(
         particle.split_root = *family;
         body.particles.push(particle);
     }
-    let mut cell_remap = vec![u32::MAX; sb.cells.len()];
     for (new, &old) in geometry.cell_source_ids.iter().enumerate() {
         cell_remap[old as usize] = new as u32;
     }
@@ -627,37 +673,13 @@ fn extract_piece(
     for attachment in &mut body.attachments {
         attachment.particle = remap[attachment.particle as usize];
     }
-    // The old warm-start impulses and inversion flags follow the volume pieces their
-    // particles belonged to; the actual boundary membership is rebuilt below.
-    body.volume_pieces = sb
-        .volume_pieces
-        .iter()
-        .filter_map(|previous| {
-            let particles: Vec<_> = previous
-                .particles
-                .iter()
-                .copied()
-                .filter(|&p| piece_of_particle[p as usize] == k)
-                .collect();
-            (!particles.is_empty()).then_some(SoftVolumePiece {
-                particles,
-                elements: Vec::new(),
-                rest_volume: previous.rest_volume,
-                impulse: previous.impulse,
-                inverted: previous.inverted,
-            })
-        })
-        .collect();
+    // Previous warm impulses already follow source particles in volume_pieces.
+    // One remapped volume rebuild below computes their new boundary membership.
+    body.volume_pieces = volume_pieces;
     body.clusters = Vec::new();
     let mut moves = Vec::new();
-    for (ci, cluster) in sb.clusters.iter().enumerate() {
-        let inside = cluster
-            .particles
-            .first()
-            .is_some_and(|&v| piece_of_particle[v as usize] == k);
-        if !cluster.is_live() || !inside {
-            continue;
-        }
+    for &ci in cluster_indices {
+        let cluster = &sb.clusters[ci as usize];
         let new_ci = body.clusters.len() as u32;
         let mut cluster = cluster.clone();
         if cluster.shape_impulses.len() == cluster.particles.len() {
@@ -682,7 +704,7 @@ fn extract_piece(
             }
         }
         body.clusters.push(cluster);
-        moves.push((ci as u32, new_ci));
+        moves.push((ci, new_ci));
     }
     body.rebuild_cluster_refs();
     let topology_remap = SoftTopologyRemap {
@@ -695,8 +717,7 @@ fn extract_piece(
         mesh.remap_topology(body, &topology_remap);
         mesh.clear_contacts();
     });
-    body.rebuild_boundary_tables();
-    body.rebuild_volume_pieces(&remap);
+    body.rebuild_boundary_tables(&remap);
     body.update_cluster_cells();
     body.recolor();
     body.topology_version = body.topology_version.wrapping_add(1);
@@ -716,7 +737,17 @@ fn extract_piece(
     body.contact_approach_step_open = false;
     body.contact_load = 0.0;
     body.load_extra_substeps = 0;
-    (body, moves, remap)
+    // A full clear here would reintroduce O(fragments * source particles).
+    // Each source particle/cell belongs to one extracted piece, so reset only
+    // entries just written. Family roots may repeat, which is harmless.
+    for &old in particle_indices {
+        remap[old as usize] = u32::MAX;
+        family_roots[sb.particles[old as usize].split_root(old) as usize] = u32::MAX;
+    }
+    for &old in &geometry.cell_source_ids {
+        cell_remap[old as usize] = u32::MAX;
+    }
+    (body, moves)
 }
 
 /// Re-bases what hangs on the proxies of `poses` onto their fresh frames: the local frames of

@@ -56,6 +56,9 @@ impl SoftConstraintsSet {
             ),
         };
         let mut per_body = core::mem::take(&mut self.edge_workspace.per_body);
+        // The set of awake bodies can shrink when fragments are removed; never
+        // dispatch a stale workspace slot to an absent body.
+        per_body.truncate(self.awake.len());
         per_body.resize_with(self.awake.len(), Default::default);
         {
             let workspace = &mut self.edge_workspace;
@@ -99,21 +102,66 @@ impl SoftConstraintsSet {
                 .and_then(|e| e.particles.iter().copied().find(|&s| s != u32::MAX));
             live.map(&group_of_slot).unwrap_or(own as usize)
         };
+        // Count and reserve the final contact arena after the per-body pass;
+        // dense cold tears would otherwise repeatedly reallocate large rows.
+        let total_contacts: usize = per_body.iter().map(|body| body.contacts.len()).sum();
+        // The parallel transfer pays for itself on the first large cold allocation;
+        // once the arena capacity is warm, regular bulk appends are faster.
+        let growing_arena = self.contacts.capacity() - self.contacts.len() < total_contacts;
+        self.contacts.reserve(total_contacts);
         for gi in 0..self.groups.len() {
             let start = self.contacts.len();
-            for ai in self.groups[gi].awake.clone() {
-                if !self.awake[ai].frozen {
-                    self.contacts.append(&mut per_body[ai].contacts);
+            // Once the per-body pass has assembled a dense single-group island,
+            // transfer its independently owned buffers directly into disjoint
+            // slices of the final arena. Keep the normal serial path for small
+            // scenes, frozen bodies and noncontiguous multi-group layouts.
+            #[cfg(feature = "parallel")]
+            let parallel_transfer = self.groups.len() == 1
+                && self.groups[gi].awake == (0..self.awake.len())
+                && self.awake.iter().all(|body| !body.frozen)
+                && total_contacts >= 32_768
+                && growing_arena
+                && rayon::current_num_threads() > 1;
+            #[cfg(not(feature = "parallel"))]
+            let parallel_transfer = false;
+            if parallel_transfer {
+                #[cfg(feature = "parallel")]
+                {
+                    use rayon::prelude::*;
+                    {
+                        let mut spare = self.contacts.spare_capacity_mut();
+                        let mut segments = crate::alloc_prelude::Vec::with_capacity(per_body.len());
+                        for body in &mut per_body {
+                            let (output, rest) = spare.split_at_mut(body.contacts.len());
+                            segments.push((output, &mut body.contacts));
+                            spare = rest;
+                        }
+                        segments.into_par_iter().for_each(|(output, contacts)| {
+                            for (slot, contact) in output.iter_mut().zip(contacts.drain(..)) {
+                                slot.write(contact);
+                            }
+                        });
+                    }
+                    // SAFETY: each segment was an independent spare-capacity
+                    // slice and every slot was initialized exactly once by its
+                    // producer before the parallel transfer returned.
+                    unsafe { self.contacts.set_len(start + total_contacts) };
                 }
-            }
-            for (ai, awake) in self.awake.iter().enumerate() {
-                if awake.frozen {
-                    self.contacts.extend(
-                        per_body[ai]
-                            .contacts
-                            .iter()
-                            .filter(|c| constraint_group(c, awake.group) == gi),
-                    );
+            } else {
+                for ai in self.groups[gi].awake.clone() {
+                    if !self.awake[ai].frozen {
+                        self.contacts.append(&mut per_body[ai].contacts);
+                    }
+                }
+                for (ai, awake) in self.awake.iter().enumerate() {
+                    if awake.frozen {
+                        self.contacts.extend(
+                            per_body[ai]
+                                .contacts
+                                .iter()
+                                .filter(|c| constraint_group(c, awake.group) == gi),
+                        );
+                    }
                 }
             }
             // The softness of a constraint follows its group's substep length (the constraints were built

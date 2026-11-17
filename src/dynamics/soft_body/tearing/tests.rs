@@ -460,3 +460,67 @@ fn split_cloth_quad_across_its_diagonal() {
     assert!(close(sb.rest_measure(), measure));
     sb.validate_topology().unwrap();
 }
+
+// Locked held-out user-frame workloads: a dense tear of every surface cell,
+// followed by the first six full physics steps (includes contact detection and solving).
+#[cfg(feature = "dim2")]
+#[test]
+#[ignore]
+fn benchmark_posttear_contact_arena() {
+    for (nx, ny) in [(45, 18), (64, 32), (80, 45)] {
+        let builder = SoftBodyBuilder::grid(Vector::new(0.0, 1.5), Vector::new(1.5, 0.6), nx, ny)
+            .particle_mass(0.004)
+            .cell_model(SoftBodyCellModel::Corotational)
+            .surface_collider(ColliderBuilder::ball(0.05));
+        let (mut world, handle) = world_with(builder);
+        let cells: Vec<u32> = (0..world.soft_bodies[handle].cells().len() as u32).collect();
+        let event = world.tear_soft_body(handle, &[], &cells).unwrap();
+        let num_fragments = family(&world, handle).len();
+        std::println!(
+            "SCENE nx={nx} ny={ny} fragments={num_fragments} cells={}",
+            event.torn_cells.len()
+        );
+        world.physics_pipeline.counters.enable();
+        for i in 0..6 {
+            let start = std::time::Instant::now();
+            world.step();
+            let ms = start.elapsed().as_secs_f64() * 1_000.0;
+            let c = &world.physics_pipeline.counters;
+            let sum_x: Real = world
+                .soft_bodies
+                .iter()
+                .map(|(_, sb)| sb.particles().iter().map(|p| p.position.x).sum::<Real>())
+                .sum();
+            std::println!(
+                "SCENE_STEP nx={nx} ny={ny} i={i} total={ms:.3} narrow={:.3} resolve={:.3} assemble={:.3} contacts={} sum_x={sum_x:.8}",
+                c.cd.narrow_phase_time.time_ms(),
+                c.solver.velocity_resolution_time.time_ms(),
+                c.solver.velocity_assembly_time.time_ms(),
+                c.solver.ncontacts
+            );
+        }
+    }
+}
+
+/// Post-tear removal must not reuse stale per-body contact workspaces: the
+/// narrow phase sees fewer fragments on the next step, not an out-of-range body.
+#[cfg(feature = "dim2")]
+#[test]
+fn contacts_survive_removing_most_torn_fragments() {
+    let builder = SoftBodyBuilder::grid(Vector::ZERO, Vector::splat(1.0), 18, 8)
+        .particle_mass(0.05)
+        .surface_collider(ColliderBuilder::ball(0.02));
+    let (mut world, handle) = world_with(builder);
+    let cells: Vec<u32> = (0..world.soft_bodies[handle].cells().len() as u32).collect();
+    world.tear_soft_body(handle, &[], &cells).unwrap();
+    let fragments = family(&world, handle);
+    assert!(fragments.len() > 10);
+    world.step();
+    for fragment in fragments.iter().skip(3) {
+        assert!(world.remove_soft_body(*fragment).is_some());
+    }
+    assert_eq!(world.soft_bodies.len(), 3);
+    for _ in 0..3 {
+        world.step();
+    }
+}

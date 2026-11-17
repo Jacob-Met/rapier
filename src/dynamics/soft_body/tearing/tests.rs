@@ -104,6 +104,32 @@ fn many_fragments_keep_their_material_and_colliders() {
     assert!((measure_after - measure).abs() <= measure * 1.0e-5);
 }
 
+/// Splitting a closed volume must preserve its pressure warm start across old-to-new
+/// particle renumbering, instead of discarding it in an intermediate rebuild.
+#[cfg(feature = "dim2")]
+#[test]
+fn fragment_volume_warm_start_survives_remap() {
+    let builder = SoftBodyBuilder::grid(Vector::ZERO, Vector::splat(1.0), 6, 6)
+        .volume_preservation(true)
+        .particle_mass(0.1);
+    let (mut world, handle) = world_with(builder);
+    let volume_pieces = &mut world.soft_bodies[handle].volume_pieces;
+    assert_eq!(volume_pieces.len(), 1);
+    volume_pieces[0].impulse = 2.125;
+    volume_pieces[0].inverted = true;
+    let event = world
+        .cut_soft_body(handle, &[Vector::new(0.0, -5.0), Vector::new(0.0, 5.0)])
+        .expect("cut should separate a closed soft body");
+    assert_eq!(event.pieces.len(), 2);
+    for piece in event.bodies() {
+        let sb = &world.soft_bodies[piece];
+        assert_eq!(sb.volume_pieces.len(), 1);
+        assert_eq!(sb.volume_pieces[0].impulse, 2.125);
+        assert!(sb.volume_pieces[0].inverted);
+        sb.validate_topology().unwrap();
+    }
+}
+
 /// Checks the seeded components of a torn rope, of a cluster of it, and of a body made of
 /// disconnected ropes: measure and mass add up, a never-connected cluster reports separate
 /// components, and a seed pair reaches only the ropes it touches.
@@ -562,10 +588,12 @@ fn benchmark_posttear_contact_arena() {
             .surface_collider(ColliderBuilder::ball(0.05));
         let (mut world, handle) = world_with(builder);
         let cells: Vec<u32> = (0..world.soft_bodies[handle].cells().len() as u32).collect();
+        let tear_start = std::time::Instant::now();
         let event = world.tear_soft_body(handle, &[], &cells).unwrap();
+        let tear_ms = tear_start.elapsed().as_secs_f64() * 1_000.0;
         let num_fragments = family(&world, handle).len();
         std::println!(
-            "SCENE nx={nx} ny={ny} fragments={num_fragments} cells={}",
+            "SCENE nx={nx} ny={ny} fragments={num_fragments} cells={} tear_ms={tear_ms:.3}",
             event.torn_cells.len()
         );
         world.physics_pipeline.counters.enable();

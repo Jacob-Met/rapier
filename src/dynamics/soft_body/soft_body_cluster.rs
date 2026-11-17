@@ -548,8 +548,7 @@ impl SoftBody {
         });
 
         // The boundary tables (closedness, owning cells, volume pieces) and the meshes' own.
-        self.rebuild_boundary_tables();
-        self.rebuild_volume_pieces(&remap);
+        self.rebuild_boundary_tables(&remap);
         self.update_cluster_cells();
         self.recolor();
         self.modified = true;

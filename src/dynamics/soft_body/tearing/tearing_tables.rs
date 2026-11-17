@@ -6,12 +6,14 @@ use super::super::{SoftBody, soft_body_coloring};
 impl SoftBody {
     /// Rebuilds the tables derived from the boundary and the cells (closedness, owning cells,
     /// volume pieces), and the collision meshes' own tables.
-    pub(crate) fn rebuild_boundary_tables(&mut self) {
+    /// `remap` translates old particle indices into the current topology for
+    /// volume-constraint warm starts; an empty slice means unchanged indices.
+    pub(crate) fn rebuild_boundary_tables(&mut self, remap: &[u32]) {
         self.boundary_closed = surface_is_closed(&self.boundary);
         self.boundary_element_cells = surface_element_cells(&self.boundary, &self.cells);
         self.update_surface_flags();
         self.rebuild_mesh_tables();
-        self.rebuild_volume_pieces(&[]);
+        self.rebuild_volume_pieces(remap);
     }
 
     /// Recomputes the parallel colors of every element.

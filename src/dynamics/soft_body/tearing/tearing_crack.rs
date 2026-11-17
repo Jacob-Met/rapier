@@ -39,8 +39,14 @@ impl SoftBody {
         if !self.cells.is_empty() {
             self.cell_index = Some(self.build_cell_index());
         }
+        // Tiny tears finish before a new edge incidence table pays for itself.
+        // The indexed path amortizes its construction over several split vertices.
+        if torn_edges.len().saturating_add(torn_cells.len()) > 2 {
+            self.edge_index = Some(self.build_edge_index());
+        }
         let changed = self.crack_body_indexed(torn_edges, torn_cells, event);
         self.cell_index = None;
+        self.edge_index = None;
         changed
     }
 

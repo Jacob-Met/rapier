@@ -429,6 +429,7 @@ impl SoftBodySet {
             template.pieces.clear();
             template.volume_pieces.clear();
             template.cell_index = None;
+            template.edge_index = None;
 
             let mut geometry: Vec<PieceGeometry> = (0..pieces.len())
                 .map(|_| PieceGeometry::default())

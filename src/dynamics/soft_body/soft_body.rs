@@ -150,6 +150,9 @@ pub struct SoftBody {
     /// the per-split searches look around a particle instead of scanning the whole body.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) cell_index: Option<Vec<Vec<u32>>>,
+    /// Sorted edge ids incident on each particle, transient during a dense tear.
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    pub(crate) edge_index: Option<Vec<Vec<u32>>>,
     /// User-defined data associated to this soft body.
     pub user_data: u128,
 }

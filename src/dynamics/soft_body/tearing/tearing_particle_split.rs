@@ -130,6 +130,37 @@ impl SoftBody {
         index
     }
 
+    /// Index the stable edge slots once per tear, and update only touched incidence lists as
+    /// particles split. `Vec` order preserves the original edge visitation order.
+    pub(super) fn build_edge_index(&self) -> Vec<Vec<u32>> {
+        let mut index = vec![Vec::new(); self.particles.len()];
+        for (ei, edge) in self.edges.iter().enumerate() {
+            for &v in &edge.vertices {
+                let ids = &mut index[v as usize];
+                if ids.last() != Some(&(ei as u32)) {
+                    ids.push(ei as u32);
+                }
+            }
+        }
+        index
+    }
+
+    fn reindex_edge(&mut self, edge_id: u32, from: u32, to: u32) {
+        if from == to {
+            return;
+        }
+        if let Some(index) = &mut self.edge_index {
+            let from = &mut index[from as usize];
+            if let Ok(pos) = from.binary_search(&edge_id) {
+                from.remove(pos);
+            }
+            let to = &mut index[to as usize];
+            if let Err(pos) = to.binary_search(&edge_id) {
+                to.insert(pos, edge_id);
+            }
+        }
+    }
+
     /// The cells around `v` when the cell index is up (during a tear) and `kind` is cells.
     fn indexed_cells(&self, kind: MeasureKind, v: u32) -> Option<&[u32]> {
         match (kind, &self.cell_index) {
@@ -604,6 +635,9 @@ impl SoftBody {
                 if let Some(index) = &mut self.cell_index {
                     index.push(Vec::new());
                 }
+                if let Some(index) = &mut self.edge_index {
+                    index.push(Vec::new());
+                }
                 log.split_particles.push((copy, v));
                 copies.push(copy);
             }
@@ -647,6 +681,9 @@ impl SoftBody {
                 MeasureKind::Segments => &mut self.edges[e as usize].vertices,
             };
             replace(target, v, copies[g]);
+            if kind == MeasureKind::Segments {
+                self.reindex_edge(e, v, copies[g]);
+            }
         }
 
         // The other edges at `v`. One shared by fan elements of several groups (the crack ends
@@ -654,8 +691,13 @@ impl SoftBody {
         let is_measure = |e: &super::super::SoftBodyEdge| {
             kind == MeasureKind::Segments && e.kind == SoftBodyEdgeKind::Structural
         };
+        let incident: Vec<usize> = if let Some(index) = &self.edge_index {
+            index[v as usize].iter().map(|&id| id as usize).collect()
+        } else {
+            (0..self.edges.len()).collect()
+        };
         let mut new_edges = Vec::new();
-        for ei in 0..self.edges.len() {
+        for ei in incident {
             let edge = self.edges[ei];
             if !edge.vertices.contains(&v) || is_measure(&edge) {
                 continue;
@@ -671,6 +713,7 @@ impl SoftBody {
                 None => self.group_toward(v, fan, &edge.vertices),
             };
             replace(&mut self.edges[ei].vertices, v, copies[g]);
+            self.reindex_edge(ei as u32, v, copies[g]);
             for &other in groups.iter().skip(1) {
                 let mut copy = self.edges[ei];
                 replace(&mut copy.vertices, copies[g], copies[other]);
@@ -678,12 +721,38 @@ impl SoftBody {
                 new_edges.push(copy);
             }
         }
+        let first_new_edge = self.edges.len();
         self.edges.extend(new_edges);
+        if let Some(index) = &mut self.edge_index {
+            for (delta, edge) in self.edges[first_new_edge..].iter().enumerate() {
+                let id = (first_new_edge + delta) as u32;
+                for &w in &edge.vertices {
+                    let ids = &mut index[w as usize];
+                    if let Err(pos) = ids.binary_search(&id) {
+                        ids.insert(pos, id);
+                    }
+                }
+            }
+        }
 
         // Straddlers: a non-measure edge between two neighbors of `v` on disjoint groups, not
         // held together by a measure element (a bend edge over `v`, a quad diagonal).
-        let mut straddling = vec![false; self.edges.len()];
-        for (ei, e) in self.edges.iter().enumerate() {
+        // Only edges whose endpoints lie in the current fan ring could straddle its groups.
+        // Avoid rescanning every body edge for each new particle in a dense tear.
+        let candidates: Vec<usize> = if let Some(index) = &self.edge_index {
+            let mut ids: Vec<usize> = ring
+                .keys()
+                .flat_map(|&v| index[v as usize].iter().map(|&id| id as usize))
+                .collect();
+            ids.sort_unstable();
+            ids.dedup();
+            ids
+        } else {
+            (0..self.edges.len()).collect()
+        };
+        let mut straddling = Vec::new();
+        for ei in candidates {
+            let e = &self.edges[ei];
             if is_measure(e) || e.vertices.iter().any(|w| copies.contains(w)) {
                 continue;
             }
@@ -694,13 +763,24 @@ impl SoftBody {
             if gx.iter().all(|g| gy.binary_search(g).is_err())
                 && !self.share_measure_element(kind, x, y)
             {
-                straddling[ei] = true;
+                straddling.push(ei);
                 log.removed_edges.push(e.vertices);
             }
         }
-        if straddling.contains(&true) {
-            let mut keep = straddling.iter().map(|s| !s);
-            self.edges.retain(|_| keep.next().unwrap());
+        if !straddling.is_empty() {
+            let mut removed = straddling.into_iter().peekable();
+            let mut old_index = 0;
+            self.edges.retain(|_| {
+                let remove = removed.peek().is_some_and(|&id| id == old_index);
+                if remove {
+                    removed.next();
+                }
+                old_index += 1;
+                !remove
+            });
+            if self.edge_index.is_some() {
+                self.edge_index = Some(self.build_edge_index());
+            }
         }
 
         #[cfg(feature = "dim3")]
